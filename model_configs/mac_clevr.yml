@@ -1,11 +1,4 @@
 backend: tensorflow_v1
-env:
-  clevr:
-    variables:
-      dataset: src.clevr.CLEVR
-  gqa:
-    variables:
-      dataset: src.gqa.GQA
 model:
   name: src.tf.mac.MAC
   image:
@@ -32,6 +25,7 @@ model:
     memory_init: prm
     control_init: questions
     init_knowledge_base: false
+    memory_variational_dropout: true
     control:
       share_input_layer: true
       activation_fn: none
@@ -43,7 +37,11 @@ model:
       project_activation_fn: none
     read:
       control: true
+      control_attention_type: mul
       control_concat_knowledge_base: false
+      control_concat_projection: false
+      control_concat_interactions: false
+
       memory_concat_knowledge_base: true
       memory_concat_projection: true
       activation_fn: elu
@@ -55,9 +53,11 @@ model:
       inputs: info_sum
       activation_fn: none
       info_activation_fn: none
+      memory_activation_fn: none
       memory_batch_norm: false
       self_attention: false
       project_memory: true
+      project_info: false
       merge_control: false
       memory_gate: false
   dim: 512
@@ -85,25 +85,26 @@ model:
   batch_norm_decay: 0.999
   batch_norm_center: false
   batch_norm_scale: false
-  memory_variational_dropout: true
 dataset:
-  name: ~dataset
+  name: src.clevr.CLEVR
   embedding:
     dim: 300
   shuffle: true
 train:
-  eval: [valid]
-  num_epochs: 100
+  valid_set: val
+  num_epochs: 50
   batch_size: 64
   optimizer:
     name: adam
     lr: 0.0001
   lr_scheduler:
-    decay_steps: 1e
+    decay_steps: 3
     decay_rate: 0.5
+  save_every: 1e
   log_every: 0.1e
   max_grad_norm: 5
   ema_decay_rate: 0.999
 test:
+  test_sets: [test]
   log_every: 5s
   metrics: [acc]

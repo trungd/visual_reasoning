@@ -1,0 +1,111 @@
+backend: tensorflow_v1
+random_seed: 1
+model:
+  name: src.tf.mac.MAC
+  image:
+    model: resnet101
+    model_stage: 3
+    height: 224
+    width: 224
+    num_channels: 3
+    output_height: 7
+    output_width: 7
+    output_num_channels: 2048
+  embedding:
+    shared: false
+    trainable: true
+    dim: 300
+  encoder:
+    type: LSTM
+    dim: 512
+    num_layers: 1
+    bidirectional: true
+    dropout: 0.15
+    project: false
+  mac:
+    memory_init: prm
+    control_init: questions
+    init_knowledge_base: false
+    memory_variational_dropout: true
+    control:
+      share_input_layer: true
+      activation_fn: none
+      input_activation_fn: tanh
+      concat_words: false
+      project: false
+      project_activation_fn: none
+    read:
+      control: true
+      control_attention_type: mul
+      control_concat_knowledge_base: false
+      control_concat_projection: false
+      control_concat_interactions: false
+      memory_concat_knowledge_base: true
+      memory_concat_projection: true
+      activation_fn: elu
+      project_inputs: true
+      project_memory: true
+      attention_type: mul
+      attention_dim: 512
+    write:
+      inputs: info_sum
+      activation_fn: none
+      info_activation_fn: none
+      memory_activation_fn: none
+      memory_batch_norm: false
+      self_attention: false
+      project_memory: true
+      project_info: false
+      merge_control: false
+      memory_gate: false
+  dim: 512
+  control_dim: 512
+  memory_dim: 512
+  attention_dim: 512
+  add_null_word: false
+  stem:
+    dim: 512
+    num_layers: 2
+    kernel_size: 3
+    location_aware: false
+    linear: false
+  embed_dim: 300
+  max_step: 4
+  self_attention: true
+  memory_gate: true
+  dropout: 0.15
+  kernel_size: 3
+  classifier:
+    dims: [512]
+    use_question: true
+    use_image: false
+    image_output_dim: 1024
+  batch_norm_decay: 0.999
+  batch_norm_center: false
+  batch_norm_scale: false
+dataset:
+  name: src.gqa.GQA
+  balanced: false
+  embedding:
+    dim: 300
+  shuffle: true
+train:
+  valid_set: val
+  num_epochs: 50
+  batch_size: 256
+  optimizer:
+    name: adam
+    lr: 0.0001
+  lr_scheduler:
+    decay_steps: 2
+    decay_rate: 0.5
+  save_every: 0.1e
+  log_every: 0.1e
+  max_grad_norm: 8
+  ema_decay_rate: 0.999
+test:
+  batch_size: 128
+  test_sets: [submission]
+  log_every: 5s
+  metrics: [acc]
+  output: default

@@ -67,7 +67,6 @@ class MACCell:
             question_contextual_word_embeddings,
             question_lengths,
             knowledge_base,
-            batch_size,
             reuse=None):
         self.params = params
         self.configs = params.model.mac
@@ -80,7 +79,6 @@ class MACCell:
 
         self.knowledge_base = knowledge_base
         self.dropout = placeholders.dropout
-        self.batch_size = batch_size
         self.reuse = reuse
         
         self.control_dim = params.model.control_dim
@@ -230,11 +228,17 @@ class MACCell:
                 dim = cfg.attention_dim
 
             # parameters for concatenating knowledge base elements
-            concat = {"x": cfg.readMemConcatKB, "proj": cfg.readMemConcatProj}
+            concat = {"x": cfg.memory_concat_knowledge_base, "proj": cfg.memory_concat_knowledge_base}
 
             # compute interactions between knowledge base and memory
-            interactions, interDim = ops.mul(x=knowledge_base, y=memory, dim=self.memory_dim,
-                                             proj=proj, concat=concat, interMod=cfg.readMemAttType, name="memInter")
+            interactions, interDim = ops.mul(
+                x=knowledge_base,
+                y=memory,
+                dim=self.memory_dim,
+                proj=proj,
+                concat=concat,
+                interMod=cfg.attention_type,
+                name="memInter")
 
             projectedKB = proj.get("x") if proj else None
 
@@ -254,13 +258,13 @@ class MACCell:
 
                 interactions, interDim = ops.mul(
                     interactions, control, dim,
-                    interMod=cfg.readCtrlAttType,
-                    concat={"x": cfg.readCtrlConcatInter},
+                    interMod=cfg.control_attention_type,
+                    concat={"x": cfg.control_concat_interactions},
                     name="ctrlInter")
 
                 # optionally concatenate knowledge base elements
-                if cfg.readCtrlConcatKB:
-                    if cfg.readCtrlConcatProj:
+                if cfg.control_concat_knowledge_base:
+                    if cfg.control_concat_projection:
                         addedInp, addedDim = projectedKB, cfg.attDim
                     else:
                         addedInp, addedDim = knowledge_base, self.memory_dim
@@ -311,12 +315,11 @@ class MACCell:
     Return the new memory 
     [batch_size, memDim]
     '''
-
     def write(self, memory, info, control, contControl=None, name="", reuse=None):
         cfg = self.configs.write
         with tf.variable_scope("write" + name, reuse=reuse):
             # optionally project info
-            if cfg.writeInfoProj:
+            if cfg.project_info:
                 info = ops.linear(info, self.memory_dim, self.memory_dim, name="info")
 
             # optional info nonlinearity
@@ -358,7 +361,7 @@ class MACCell:
                 dim += self.memory_dim
 
                 # project memory back to memory dimension
-            if cfg.writeMemProj or (dim != self.memory_dim):
+            if cfg.project_memory or (dim != self.memory_dim):
                 new_memory = ops.linear(new_memory, dim, self.memory_dim, name="new_memory")
 
             # optional memory nonlinearity
@@ -377,7 +380,7 @@ class MACCell:
                 new_memory = new_memory * z + memory * (1 - z)
 
                 # optional batch normalization
-            if cfg.memoryBN:
+            if cfg.memory_batch_norm:
                 new_memory = tf.contrib.layers.batch_norm(
                     new_memory, decay=cfg.bnDecay,
                     center=cfg.bnCenter, scale=cfg.bnScale,
@@ -441,7 +444,7 @@ class MACCell:
             inputName = "qInput"
             inputNameU = "qInputU"
             inputReuseU = inputReuse = (self.iteration > 0)
-            if cfg.control_inputUnshared:
+            if not cfg.control.share_input_layer:
                 inputNameU = "qInput%d" % self.iteration
                 inputReuseU = None
 
@@ -565,7 +568,7 @@ class MACCell:
             self.outWords = pWords if cfg.controlOutWordsProj else words
 
         # initialize memory variational dropout mask
-        if cfg.memory_variational_dropout:
+        if self.configs.memory_variational_dropout:
             self.memDpMask = ops.generateVarDpMask((batch_size, self.memory_dim), self.dropout)
 
         return MACCellTuple(initialControl, initialMemory)
@@ -637,7 +640,7 @@ class MAC(BaseModelV1):
                     features = ops.multigridRNNLayer(features, H, W, outDim)
 
             # flatten the 2d images into a 1d KB
-            features = tf.reshape(features, (self.batch_size, -1, outDim))
+            features = tf.reshape(features, (tf.shape(images)[0], -1, outDim))
 
         return features
 
@@ -768,6 +771,7 @@ class MAC(BaseModelV1):
             name="",
             reuse=None):
         cfg = self.configs.mac
+        batch_size = tf.shape(question_lengths)[0]
         with tf.variable_scope("mac" + name, reuse=reuse):
             # initialize knowledge base
             # optionally merge question into knowledge base representation
@@ -779,8 +783,8 @@ class MAC(BaseModelV1):
                 knowledge_base = ops.linear(cnct, dim, self.memory_dim, name="initKB")
 
             # initialize memory variational dropout mask
-            if self.configs.memory_variational_dropout:
-                self.memDpMask = ops.generateVarDpMask((self.batch_size, self.memory_dim), self.placeholders.dropout)
+            if self.configs.mac.memory_variational_dropout:
+                self.memDpMask = ops.generateVarDpMask((batch_size, self.memory_dim), self.placeholders.dropout)
 
             mac_cell = MACCell(
                 self.params,
@@ -790,10 +794,9 @@ class MAC(BaseModelV1):
                 question_contextual_word_embeddings,
                 question_lengths,
                 knowledge_base,
-                batch_size=self.batch_size,
                 reuse=reuse)
 
-            state = mac_cell.zero_state(self.batch_size)
+            state = mac_cell.zero_state(batch_size)
 
             for i in range(self.configs.max_step):
                 mac_cell.iteration = i
@@ -890,7 +893,6 @@ class MAC(BaseModelV1):
 
         output, dim = self.build_output(final_memory, question_embeddings, images)
         logits = self.build_classifier(output, dim, aEmbeddings)
-        self.add_debug_variable("sm", tf.nn.softmax(logits, -1))
         preds = tf.cast(tf.argmax(logits, axis=-1), tf.int32)
 
         return logits, preds
@@ -902,10 +904,6 @@ class MAC(BaseModelV1):
         else:
             feed_dict[self.placeholders.dropout] = 0.0
         return super().populate_feed_dict(feed_dict, is_training)
-
-    @property
-    def batch_size(self):
-        return tf.shape(self.placeholders.question_lengths)[0]
 
     @property
     def references(self):
@@ -921,3 +919,7 @@ class MAC(BaseModelV1):
         return dict(
             **super().get_metric_ops(),
             acc=tf.metrics.accuracy(self.references, self.predictions))
+
+    @property
+    def batch_size(self):
+        return tf.shape(self.placeholders.question_lengths)[0]
