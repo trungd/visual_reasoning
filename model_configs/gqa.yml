@@ -1,0 +1,52 @@
+backend: tensorflow_v1
+random_seed: 1
+model:
+  name: src.tf.model.Model
+  image:
+    height: 7
+    width: 7
+    num_channels: 2048
+  embedding:
+    trainable: true
+    dim: 300
+  encoder:
+    type: LSTM
+    dim: 512
+    num_layers: 1
+    bidirectional: true
+    dropout: 0.15
+    project: false
+    dropout_input: 0.15
+    dropout_state: 0.
+    dropout_question: 0.08
+    variational_dropout: false
+  dim: 512
+  dropout: 0.2
+dataset:
+  name: src.gqa.GQA
+  balanced: false
+  size: 10000
+  embedding:
+    dim: 300
+  image:
+    height: 7
+    width: 7
+    num_channels: 2048
+  shuffle: true
+train:
+  num_epochs: 50
+  batch_size: 256
+  optimizer:
+    name: adam
+    lr: 0.0001
+  lr_scheduler:
+    decay_steps: 2
+    decay_rate: 0.5
+  save_every: 10e
+  log_every: 10e
+  max_grad_norm: 8
+  # ema_decay_rate: 0.999
+test:
+  batch_size: 128
+  test_sets: []
+  metrics: [acc]

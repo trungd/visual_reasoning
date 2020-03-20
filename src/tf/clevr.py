@@ -1,3 +1,4 @@
+import random
 from collections import namedtuple
 from typing import Dict, Any
 
@@ -20,7 +21,7 @@ class TensorflowCLEVR(Dataset):
         self._vocab = None
         self._answers = None
         self.h = h5py.File(builder.get_image_features_path(self.mode, "mac"), 'r')
-        self.image_features = self.h['features']
+        self.image_features = self.h["features"]
         # self.image_idx = self.h['indices']
         self._word_embeddings = None
 
@@ -93,17 +94,16 @@ class TensorflowCLEVR(Dataset):
         if initializing == 'normal':
             return np.random.randn(size, dim)
         elif initializing == 'uniform':
-            return np.random.uniform(
-                low=-scale,
-                high=scale,
-                size=(size, dim))
+            return np.random.uniform(low=-scale, high=scale, size=(size, dim))
 
     @property
     def word_embeddings(self):
+        np.random.seed(0)
         if not self._word_embeddings:
             return dict(
                 q=self.get_word_embeddings(self.vocab_size, self.configs.embedding.dim),
-                a=self.get_word_embeddings(len(self.answers), self.configs.embedding.dim)
+                a=None
+                # a=self.get_word_embeddings(len(self.answers), self.configs.embedding.dim)
             )
         return self._word_embeddings
 
@@ -111,3 +111,10 @@ class TensorflowCLEVR(Dataset):
         return " ".join(self.vocab.decode_idx_list(batch_input.question)), \
                self.answers[batch_input.answer], \
                self.answers[y_pred]
+
+    def shuffle(self):
+        super().shuffle()
+        # data = self._data
+        # r = [random.random() for _ in range(len(data))]
+        # data = sorted(zip(data, r), key=lambda s: len(s[0].question) + s[1])
+        # self._data = [it[0] for it in data]

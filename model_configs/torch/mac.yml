@@ -1,0 +1,29 @@
+backend: pytorch
+model:
+  name: src.torch.models.MAC
+  dim: 512
+  embed_dim: 300
+  max_step: 4
+  encoder:
+    type: lstm
+    dim: 512
+    bidirectional: true
+  write:
+    self_attention: false
+    memory_gate: false
+  classifier:
+    dims: [512]
+    use_question: true
+  dropout: 0.15
+dataset:
+  name: src.clevr.CLEVR
+train:
+  valid_set: valid
+  num_epochs: 25
+  batch_size: 128
+  optimizer:
+    name: adam
+    lr: 0.0001
+  log_every: 0.1e
+test:
+  log_every: 5s

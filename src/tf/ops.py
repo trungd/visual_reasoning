@@ -103,34 +103,6 @@ def L2RegularizationOp(l2=None):
 
 ######################################### attention #########################################
 
-'''
-Transform vectors to scalar logits.
-
-Args:
-    interactions: input vectors
-    [batchSize, N, dim]
-
-    dim: dimension of input vectors
-
-    sumMod: LIN for linear transformation to scalars.
-            SUM to sum up vectors entries to get scalar logit.
-
-    dropout: dropout value over inputs (for linear case)
-
-Return matching scalar for each interaction.
-[batchSize, N]
-'''
-sumMod = ["LIN", "SUM"]
-
-
-def inter2logits(interactions, dim, sumMod="LIN", dropout=0.0, name="", reuse=None):
-    with tf.variable_scope("inter2logits" + name, reuse=reuse):
-        if sumMod == "SUM":
-            logits = tf.reduce_sum(interactions, axis=-1)
-        else:  # "LIN"
-            logits = linear(interactions, dim, 1, dropout=dropout, name="logits")
-    return logits
-
 
 '''
 Transforms vectors to probability distribution. 
@@ -154,7 +126,7 @@ Return attention distribution over interactions.
 
 def inter2att(interactions, dim, dropout=0.0, name="", reuse=None):
     with tf.variable_scope("inter2att" + name, reuse=reuse):
-        logits = inter2logits(interactions, dim, dropout=dropout)
+        logits = linear(interactions, dim, 1, dropout=dropout, name="logits")
         attention = tf.nn.softmax(logits)
     return attention
 
@@ -318,11 +290,21 @@ Returns linear transformation result.
 # batchNorm = {"decay": float, "train": Tensor}
 # actLayer: if activation is not non, stack another linear layer
 # maybe change naming scheme such that if name = "" than use it as default_name (-->unique?)
-def linear(inp, inDim, outDim, dropout=0.0,
-           batchNorm=None, addBias=True, bias=0.0,
-           act=None, actLayer=True, actDropout=0.0,
-           retVars=False, name="", reuse=None):
-    with tf.variable_scope("linearLayer" + name, reuse=reuse):
+def linear(
+        inp,
+        inDim,
+        outDim,
+        dropout=0.0,
+        batchNorm=None,
+        addBias=True,
+        bias=0.0,
+        act=None,
+        actLayer=True,
+        actDropout=0.0,
+        retVars=False,
+        name="linear",
+        reuse=None):
+    with tf.variable_scope(name, reuse=reuse):
         W = getWeight((inDim, outDim) if outDim > 1 else (inDim,))
         b = getBias((outDim,) if outDim > 1 else ()) + bias
 
@@ -345,13 +327,13 @@ def linear(inp, inDim, outDim, dropout=0.0,
         output = get_activation_fn(act)(output)
 
         # good?
-        if act is not None and actLayer:
-            output = linear(output, outDim, outDim, dropout=actDropout, batchNorm=batchNorm,
-                            addBias=addBias, act=None, actLayer=False,
-                            name=name + "_2", reuse=reuse)
+        # if act is not None and actLayer:
+        #     output = linear(output, outDim, outDim, dropout=actDropout, batchNorm=batchNorm,
+        #                     addBias=addBias, act=None, actLayer=False,
+        #                     name=name + "_2", reuse=reuse)
 
-    if retVars:
-        return output, (W, b)
+    # if retVars:
+    #     return output, (W, b)
 
     return output
 
@@ -372,12 +354,13 @@ Args:
 
 # no activation after last layer
 # batchNorm = {"decay": float, "train": Tensor}
-def FCLayer(features, dims, batchNorm=None, dropout=0.0, act="RELU"):
+def linear_layers(features, dims, batchNorm=None, dropout=0.0, act="relu"):
     layersNum = len(dims) - 1
 
     for i in range(layersNum):
-        features = linear(features, dims[i], dims[i + 1], name="fc_%d" % i,
-                          batchNorm=batchNorm, dropout=dropout)
+        features = linear(
+            features, dims[i], dims[i + 1], name="linear_%d" % i,
+            batchNorm=batchNorm, dropout=dropout)
         # not the last layer
         if i < layersNum - 1:
             features = get_activation_fn(act)(features)
@@ -703,7 +686,7 @@ Args:
     
     reuse: whether the cell should reuse parameters or create new ones.
     
-    cellType: the cell type 
+    cell_type: the cell type 
     RNN, GRU, LSTM, MiGRU, MiLSTM, ProjLSTM
 
     act: the cell activation
@@ -717,16 +700,10 @@ Returns the cell.
 
 # tf.nn.rnn_cell.MultiRNNCell([cell(hDim, reuse = reuse) for _ in config.encNumLayers])
 # note that config.enc params not general 
-def createCell(hDim, reuse, cellType=None, act=None, projDim=None):
-    if cellType is None:
-        cellType = config.encType
-
+def createCell(hDim, reuse, cell_type=None, act=None, projDim=None):
     activation = get_activation_fn(act)
-
-    if cellType == "ProjLSTM":
+    if cell_type == "ProjLSTM":
         cell = tf.nn.rnn_cell.LSTMCell
-        if projDim is None:
-            projDim = config.cellDim
         cell = cell(hDim, num_proj=projDim, reuse=reuse, activation=activation)
         return cell
 
@@ -738,201 +715,83 @@ def createCell(hDim, reuse, cellType=None, act=None, projDim=None):
         "MiLSTM": MiLSTMCell
     }
 
-    cell = cells[cellType](hDim, reuse=reuse, activation=activation)
+    cell = cells[cell_type](hDim, reuse=reuse, activation=activation)
 
     return cell
 
 
-'''
-Runs an forward RNN layer.
-
-Args:
-    inSeq: the input sequence to run the RNN over.
-    [batchSize, sequenceLength, inDim]
-    
-    seqL: the sequence matching lengths.
-    [batchSize, 1]
-
-    hDim: hidden dimension of the RNN.
-
-    cellType: the cell type 
-    RNN, GRU, LSTM, MiGRU, MiLSTM, ProjLSTM
-
-    dropout: value for dropout over input sequence
-
-    varDp: if not None, state and input variational dropouts to apply.
-    dimension of input has to be supported (inputSize). 
-
-Returns the outputs sequence and final RNN state.  
-'''
-
-
-# varDp = {"stateDp": float, "inputDp": float, "inputSize": int}
 # proj = {"output": bool, "state": bool, "dim": int, "dropout": float, "act": str}
-def fwRNNLayer(inSeq, seqL, hDim, cellType=None, dropout=0.0, varDp=None,
-               name="", reuse=None):  # proj = None
+# varDp = {"stateDp": float, "inputDp": float, "inputSize": int}
+def rnn_layer(
+        inputs,
+        input_lengths,
+        hidden_dim,
+        bidirectional=False,
+        cell_type=None,
+        dropout=0.0,
+        varDp=None,
+        name="rnn",
+        reuse=None):
+    with tf.variable_scope(name, reuse=reuse):
+        batch_size = tf.shape(inputs)[0]
+        if bidirectional:
+            with tf.variable_scope("fw"):
+                fw = createCell(hidden_dim // 2, reuse, cell_type)
+            with tf.variable_scope("bw"):
+                bw = createCell(hidden_dim // 2, reuse, cell_type)
 
-    with tf.variable_scope("rnnLayer" + name, reuse=reuse):
-        batchSize = tf.shape(inSeq)[0]
+            if varDp:
+                fw = tf.nn.rnn_cell.DropoutWrapper(
+                    fw,
+                    state_keep_prob=1 - varDp["stateDp"],
+                    input_keep_prob=1 - varDp["inputDp"],
+                    variational_recurrent=True, input_size=varDp["inputSize"],
+                    dtype=tf.float32)
+                bw = tf.nn.rnn_cell.DropoutWrapper(
+                    bw,
+                    state_keep_prob=1 - varDp["stateDp"],
+                    input_keep_prob=1 - varDp["inputDp"],
+                    variational_recurrent=True, input_size=varDp["inputSize"],
+                    dtype=tf.float32)
+            else:
+                inputs = tf.nn.dropout(inputs, rate=dropout)
 
-        cell = createCell(hDim, reuse, cellType)  # passing reuse isn't mandatory
+            (outSeqFw, outSeqBw), (lastStateFw, lastStateBw) = tf.nn.bidirectional_dynamic_rnn(
+                fw, bw, inputs,
+                sequence_length=input_lengths,
+                initial_state_fw=fw.zero_state(batch_size, tf.float32),
+                initial_state_bw=bw.zero_state(batch_size, tf.float32),
+                swap_memory=True)
 
-        if varDp is not None:
-            cell = tf.contrib.rnn.DropoutWrapper(cell,
-                                                 state_keep_prob=varDp["stateDp"],
-                                                 input_keep_prob=varDp["inputDp"],
-                                                 variational_recurrent=True, input_size=varDp["inputSize"],
-                                                 dtype=tf.float32)
+            if isinstance(lastStateFw, tf.nn.rnn_cell.LSTMStateTuple):
+                lastStateFw = lastStateFw.h
+                lastStateBw = lastStateBw.h
+
+            outputs = tf.concat([outSeqFw, outSeqBw], axis=-1)
+            final_state = tf.concat([lastStateFw, lastStateBw], axis=-1)
         else:
-            inSeq = tf.nn.dropout(inSeq, rate=dropout)
+            cell = createCell(hidden_dim, reuse, cell_type)  # passing reuse isn't mandatory
 
-        initialState = cell.zero_state(batchSize, tf.float32)
+            if varDp:
+                cell = tf.nn.rnn_cell.DropoutWrapper(
+                    cell,
+                    state_keep_prob=1 - varDp["stateDp"],
+                    input_keep_prob=1 - varDp["inputDp"],
+                    variational_recurrent=True, input_size=varDp["inputSize"],
+                    dtype=tf.float32)
+            else:
+                inputs = tf.nn.dropout(inputs, rate=dropout)
 
-        outSeq, lastState = tf.nn.dynamic_rnn(cell, inSeq,
-                                              sequence_length=seqL,
-                                              initial_state=initialState,
-                                              swap_memory=True)
+            outputs, final_state = tf.nn.dynamic_rnn(
+                cell, inputs,
+                sequence_length=input_lengths,
+                initial_state=cell.zero_state(batch_size, tf.float32),
+                swap_memory=True)
 
-        if isinstance(lastState, tf.nn.rnn_cell.LSTMStateTuple):
-            lastState = lastState.h
+            if isinstance(final_state, tf.nn.rnn_cell.LSTMStateTuple):
+                final_state = final_state.h
 
-        # if proj is not None:
-        #     if proj["output"]:
-        #         outSeq = linear(outSeq, cell.output_size, proj["dim"], act = proj["act"],  
-        #             dropout = proj["dropout"], name = "projOutput")
-
-        #     if proj["state"]:
-        #         lastState = linear(lastState, cell.state_size, proj["dim"], act = proj["act"],  
-        #             dropout = proj["dropout"], name = "projState")
-
-    return outSeq, lastState
-
-
-'''
-Runs an bidirectional RNN layer.
-
-Args:
-    inSeq: the input sequence to run the RNN over.
-    [batchSize, sequenceLength, inDim]
-    
-    seqL: the sequence matching lengths.
-    [batchSize, 1]
-
-    hDim: hidden dimension of the RNN.
-
-    cellType: the cell type 
-    RNN, GRU, LSTM, MiGRU, MiLSTM
-
-    dropout: value for dropout over input sequence
-
-    varDp: if not None, state and input variational dropouts to apply.
-    dimension of input has to be supported (inputSize).   
-
-Returns the outputs sequence and final RNN state.     
-'''
-
-
-# varDp = {"stateDp": float, "inputDp": float, "inputSize": int}
-# proj = {"output": bool, "state": bool, "dim": int, "dropout": float, "act": str}
-def biRNNLayer(inSeq, seqL, hDim, cellType=None, dropout=0.0, varDp=None,
-               name="", reuse=None):  # proj = None,
-
-    with tf.variable_scope("birnnLayer" + name, reuse=reuse):
-        batchSize = tf.shape(inSeq)[0]
-
-        with tf.variable_scope("fw"):
-            cellFw = createCell(hDim, reuse, cellType)
-        with tf.variable_scope("bw"):
-            cellBw = createCell(hDim, reuse, cellType)
-
-        if varDp is not None:
-            cellFw = tf.nn.rnn_cell.DropoutWrapper(cellFw,
-                                                   state_keep_prob=1-varDp["stateDp"],
-                                                   input_keep_prob=1-varDp["inputDp"],
-                                                   variational_recurrent=True, input_size=varDp["inputSize"],
-                                                   dtype=tf.float32)
-
-            cellBw = tf.nn.rnn_cell.DropoutWrapper(cellBw,
-                                                   state_keep_prob=1-varDp["stateDp"],
-                                                   input_keep_prob=1-varDp["inputDp"],
-                                                   variational_recurrent=True, input_size=varDp["inputSize"],
-                                                   dtype=tf.float32)
-        else:
-            inSeq = tf.nn.dropout(inSeq, rate=dropout)
-
-        initialStateFw = cellFw.zero_state(batchSize, tf.float32)
-        initialStateBw = cellBw.zero_state(batchSize, tf.float32)
-
-        (outSeqFw, outSeqBw), (lastStateFw, lastStateBw) = tf.nn.bidirectional_dynamic_rnn(
-            cellFw, cellBw, inSeq,
-            sequence_length=seqL,
-            initial_state_fw=initialStateFw,
-            initial_state_bw=initialStateBw,
-            swap_memory=True)
-
-        if isinstance(lastStateFw, tf.nn.rnn_cell.LSTMStateTuple):
-            lastStateFw = lastStateFw.h  # take c?
-            lastStateBw = lastStateBw.h
-
-        outSeq = tf.concat([outSeqFw, outSeqBw], axis=-1)
-        lastState = tf.concat([lastStateFw, lastStateBw], axis=-1)
-
-        # if proj is not None:
-        #     if proj["output"]:
-        #         outSeq = linear(outSeq, cellFw.output_size + cellFw.output_size, 
-        #             proj["dim"], act = proj["act"], dropout = proj["dropout"], 
-        #             name = "projOutput")
-
-        #     if proj["state"]:
-        #         lastState = linear(lastState, cellFw.state_size + cellFw.state_size, 
-        #             proj["dim"], act = proj["act"], dropout = proj["dropout"], 
-        #             name = "projState")
-
-    return outSeq, lastState
-
-
-# int(hDim / 2) for biRNN?
-'''
-Runs an RNN layer by calling biRNN or fwRNN.
-
-Args:
-    inSeq: the input sequence to run the RNN over.
-    [batchSize, sequenceLength, inDim]
-    
-    seqL: the sequence matching lengths.
-    [batchSize, 1]
-
-    hDim: hidden dimension of the RNN.
-
-    bi: true to run bidirectional rnn.
-
-    cellType: the cell type 
-    RNN, GRU, LSTM, MiGRU, MiLSTM
-
-    dropout: value for dropout over input sequence
-
-    varDp: if not None, state and input variational dropouts to apply.
-    dimension of input has to be supported (inputSize).   
-
-Returns the outputs sequence and final RNN state.     
-'''
-
-
-# proj = {"output": bool, "state": bool, "dim": int, "dropout": float, "act": str}
-# varDp = {"stateDp": float, "inputDp": float, "inputSize": int}
-def RNNLayer(inSeq, seqL, hDim, bi=None, cellType=None, dropout=0.0, varDp=None,
-             name="", reuse=None):  # proj = None
-
-    with tf.variable_scope("rnnLayer" + name, reuse=reuse):
-        if bi is None:
-            bi = config.encBi
-
-        rnn = biRNNLayer if bi else fwRNNLayer
-
-        if bi:
-            hDim = int(hDim / 2)
-
-    return rnn(inSeq, seqL, hDim, cellType=cellType, dropout=dropout, varDp=varDp)  # , proj = proj
+        return outputs, final_state
 
 
 # tf counterpart?
@@ -957,7 +816,7 @@ def gridRNNLayer(features, h, w, dim, right, down, name="", reuse=None):
     with tf.variable_scope("gridRNNLayer" + name):
         batchSize = tf.shape(features)[0]
 
-        cell = createCell(dim, reuse=reuse, cellType=config.stemGridRnnMod,
+        cell = createCell(dim, reuse=reuse, cell_type=config.stemGridRnnMod,
                           act=config.stemGridAct)
 
         initialState = cell.zero_state(batchSize, tf.float32)
@@ -983,76 +842,3 @@ def gridRNNLayer(features, h, w, dim, right, down, name="", reuse=None):
         outputs = tf.stack(outputs, axis=1)
 
     return outputs
-
-
-# tf seq2seq?
-# def projRNNLayer(inSeq, seqL, hDim, labels, labelsNum, labelsDim, labelsEmb, name = "", reuse = None):
-#     with tf.variable_scope("projRNNLayer" + name):
-#         batchSize = tf.shape(features)[0]
-
-#         cell = createCell(hDim, reuse = reuse)
-
-#         projCell = ProjWrapper(cell, labelsNum, labelsDim, labelsEmb, # config.wrdEmbDim
-#             feedPrev = True, dropout = 1.0, config,
-#             temperature = 1.0, sample = False, reuse)
-
-#         initialState = projCell.zero_state(batchSize, tf.float32)
-
-#         if config.soft:
-#             inSeq = inSeq
-
-#             # outputs, _ = tf.nn.static_rnn(projCell, inputs, 
-#             #     sequence_length = seqL, 
-#             #     initial_state = initialState)
-
-#             inSeq = tf.unstack(inSeq, axis = 1)                        
-#             state = initialState
-#             logitsList = []
-#             chosenList = []
-
-#             for inp in inSeq:
-#                 (logits, chosen), state = projCell(inp, state)
-#                 logitsList.append(logits)
-#                 chosenList.append(chosen)
-#                 projCell.reuse = True
-
-#             logitsOut = tf.stack(logitsList, axis = 1)
-#             chosenOut = tf.stack(chosenList, axis = 1)
-#             outputs = (logitsOut, chosenOut)
-#         else:
-#             labels = tf.to_float(labels)
-#             labels = tf.concat([tf.zeros((batchSize, 1)), labels], axis = 1)[:, :-1] # ,newaxis
-#             inSeq = tf.concat([inSeq, tf.expand_dims(labels, axis = -1)], axis = -1)
-
-#             outputs, _ = tf.nn.dynamic_rnn(projCell, inSeq, 
-#                 sequence_length = seqL, 
-#                 initial_state = initialState,
-#                 swap_memory = True)
-
-#     return outputs #, labelsEmb
-
-############################### variational dropout ###############################
-
-'''
-Generates a variational dropout mask for a given shape and a dropout 
-probability value.
-'''
-
-
-def generateVarDpMask(shape, rate):
-    randomTensor = tf.to_float(1 - rate)
-    randomTensor += tf.random_uniform(shape, minval=0, maxval=1)
-    binaryTensor = tf.floor(randomTensor)
-    mask = tf.to_float(binaryTensor)
-    return mask
-
-
-'''
-Applies the a variational dropout over an input, given dropout mask 
-and a dropout probability value. 
-'''
-
-
-def applyVarDpMask(inp, mask, rate):
-    ret = (tf.div(inp, tf.to_float(1 - rate))) * mask
-    return ret

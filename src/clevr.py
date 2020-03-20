@@ -229,7 +229,7 @@ class CLEVR(DatasetBuilder):
             write_vocab(questions, self.vocab_path)
 
     def get_pytorch_wrapper(self, mode: str):
-        from .torch.clevr import PytorchCLEVR
+        from .torch.datasets.clevr import PytorchCLEVR
         return PytorchCLEVR(self, mode)
 
     def get_tensorflow_wrapper(self, mode: str):

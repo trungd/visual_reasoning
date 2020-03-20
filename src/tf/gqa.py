@@ -1,7 +1,7 @@
 import json
 import os
 from collections import namedtuple
-from typing import Dict, Any
+from typing import Dict, Any, NamedTuple
 
 import h5py
 import tensorflow.compat.v1 as tf
@@ -13,7 +13,9 @@ from dlex.tf.utils.utils import pad_sequence
 from tqdm import tqdm
 
 Sample = namedtuple("Sample", "question_id image_id question answer")
-Placeholders = namedtuple("Placeholders", "images questions question_lengths answers")
+Placeholders = namedtuple(
+    "Placeholders",
+    "images objects num_objects object_relations questions question_lengths answers")
 
 
 class TensorflowGQA(Dataset):
@@ -26,7 +28,9 @@ class TensorflowGQA(Dataset):
         self._image_ids = None
 
         self.h5_spatial = h5py.File(os.path.join(self.processed_data_dir, "spatial.h5"), 'r')
+        self.h5_object = h5py.File(os.path.join(self.processed_data_dir, "objects.h5"), 'r')
         self.image_spatial_features = self.h5_spatial['features']
+        self.image_object_features = self.h5_object['features']
         # self.image_idx = self.h['indices']
         self._word_embeddings = None
 
@@ -60,7 +64,7 @@ class TensorflowGQA(Dataset):
             with open(self.builder.get_data_path(self.mode)) as f:
                 lines = [l for l in f.read().split('\n') if l.strip() != ""]
             answer_dict = {a: i for i, a in enumerate(self.answers)}
-            for line in tqdm(lines, leave=False, desc="Parse dataset"):
+            for line in tqdm(lines[:self.configs.size or -1], leave=False, desc="Parse dataset"):
                 qid, image_id, q, a = line.split('\t')
                 self._data.append(Sample(
                     question_id=qid,
@@ -68,7 +72,7 @@ class TensorflowGQA(Dataset):
                     question=self.vocab.encode_token_list(q.split(' ')),
                     answer=answer_dict.get(a, -1)))
 
-            assert all(len(self.answers) > s.answer >= 0 for s in self._data)
+            # assert all(len(self.answers) > s.answer >= 0 for s in self._data)
             logger.info(f"Dataset loaded. Number of samples: {len(lines):,}")
             logger.info(
                 "Question length - max: %d - avg: %d",
@@ -86,13 +90,6 @@ class TensorflowGQA(Dataset):
     def close(self):
         self.h5_spatial.close()
 
-    def get_sliced_batch(self, placeholders, start, end) -> Placeholders:
-        return Placeholders(
-            questions=placeholders.questions[start:end],
-            question_lengths=placeholders.question_lengths[start:end],
-            images=placeholders.images[start:end],
-            answers=placeholders.answers[start:end])
-
     def populate_feed_dict(
             self,
             feed_dict: Dict[tf.placeholder, Any],
@@ -103,6 +100,12 @@ class TensorflowGQA(Dataset):
         feed_dict[placeholders.question_lengths] = qlen
         feed_dict[placeholders.images] = [self.image_spatial_features[self.image_ids[s.image_id]] for s in data]
         feed_dict[placeholders.answers] = [s.answer for s in data]
+        try:
+            feed_dict[placeholders.objects] = [self.image_object_features[self.image_ids[s.image_id]] for s in data]
+            feed_dict[placeholders.num_objects] = [self.image_object_features[self.image_ids[s.image_id]] for s in data]
+            # feed_dict[placeholders.object_relations] =
+        except:
+            pass
 
     def get_word_embeddings(self, size, dim, initializing='uniform', scale=1.):
         if initializing == 'normal':

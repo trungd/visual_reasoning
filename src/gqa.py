@@ -43,6 +43,20 @@ class GQA(DatasetBuilder):
             fn += "_balanced"
         return os.path.join(self.get_processed_data_dir(), f"{fn}.txt")
 
+    @property
+    def relation_name_path(self):
+        fn = "relations"
+        if self.configs.balanced:
+            fn += "_balanced"
+        return os.path.join(self.get_processed_data_dir(), f"{fn}.txt")
+
+    @property
+    def object_name_path(self):
+        fn = "objects"
+        if self.configs.balanced:
+            fn += "_balanced"
+        return os.path.join(self.get_processed_data_dir(), f"{fn}.txt")
+
     def get_data_path(self, mode: str):
         if mode == "valid":
             mode = "val"
@@ -58,14 +72,15 @@ class GQA(DatasetBuilder):
         if not super().maybe_preprocess(force):
             return
 
-        for mode in ["train", "val", "testdev", "test", "submission", "challenge"]:
-            data = self.load_json_data(mode)
-            self.process_questions(mode, data)
+        # for mode in ["train", "val", "testdev", "test", "submission", "challenge"]:
+        #     data = self.load_json_data(mode)
+        #     self.process_questions(mode, data)
 
         # self.tf_process_image_features(mode)
         # self.torch_process_image_features(mode, len(data['questions']))
         # self.merge_features("spatial")
         # self.merge_features("objects")
+        self.process_graphs()
 
     def load_json_data(self, mode):
         logger.info(f"Loading {mode} data...")
@@ -145,6 +160,29 @@ class GQA(DatasetBuilder):
                     ' '.join(q),
                     a,
                 ]) + "\n")
+
+    def process_graphs(self):
+        logger.info("Processing scene graphs...")
+        for mode in ["train", "val"]:
+            with open(os.path.join(self.get_raw_data_dir(), f"{mode}_sceneGraphs.json")) as f:
+                data = json.load(f)
+
+            if mode == "train":
+                relation_names = set()
+                for s in data.values():
+                    for obj in s['objects'].values():
+                        if 'relations' in obj:
+                            relation_names |= set(rela['name'] for rela in obj['relations'])
+                with open(self.relation_name_path, "w") as f:
+                    f.write('\n'.join(list(relation_names)))
+                    logger.info("")
+
+                object_names = set()
+                for s in data.values():
+                    for obj in s['objects'].values():
+                        object_names.add(obj['name'])
+                with open(self.object_name_path, "w") as f:
+                    f.write('\n'.join(list(object_names)))
 
     def run_evaluation_script(
             self,

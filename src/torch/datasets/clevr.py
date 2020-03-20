@@ -16,8 +16,8 @@ class PytorchCLEVR(Dataset):
 
         self._vocab = None
         self._answers = None
-        self.h = h5py.File(builder.get_image_features_path(self.mode, "torch"), 'r')
-        self.image_features = self.h['data']
+        self.h = h5py.File(builder.get_image_features_path(self.mode, "mac"), 'r')
+        self.image_features = self.h['features']
 
     @property
     def vocab_size(self):

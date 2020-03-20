@@ -11,53 +11,12 @@ from dlex.tf.utils.tf_v1 import get_activation_fn, multi_layer_cnn
 MACCellTuple = collections.namedtuple("MACCellTuple", ("control", "memory"))
 Placeholders = collections.namedtuple(
     "Placeholders",
-    "images questions question_lengths answers dropout")
+    "images questions question_lengths answers "
+    "dropout_read dropout_write dropout_encoder_input dropout_encoder_state dropout_memory dropout_question "
+    "dropout_stem dropout_classifier")
 
-'''
-The MAC network model. It performs reasoning processes to answer a question over
-knowledge base (the image) by decomposing it into attention-based computational steps,
-each perform by a recurrent MAC cell.
-
-The network has three main components. 
-Input unit: processes the network inputs: raw question strings and image into
-distributional representations.
-
-The MAC network: calls the MACcells (mac_cell.py) config.netLength number of times,
-to perform the reasoning process over the question and image.
-
-The output unit: a classifier that receives the question and final state of the MAC
-network and uses them to compute log-likelihood over the possible one-word answers.       
-'''
 
 class MACCell:
-    '''Initialize the MAC cell.
-    (Note that in the current version the cell is stateful --
-    updating its own internals when being called)
-
-    Args:
-        question_embeddings: the vector representation of the questions.
-        [batch_size, ctrlDim]
-
-        question_word_embeddings: the question words embeddings.
-        [batch_size, questionLength, ctrlDim]
-
-        question_contextual_word_embeddings: the encoder outputs -- the "contextual" question words.
-        [batch_size, questionLength, ctrlDim]
-
-        question_lengths: the length of each question.
-        [batch_size]
-
-        memoryDropout: dropout on the memory state (Tensor scalar).
-        readDropout: dropout inside the read unit (Tensor scalar).
-        writeDropout: dropout on the new information that gets into the write unit (Tensor scalar).
-
-        batch_size: batch size (Tensor scalar).
-        train: train or test mod (Tensor boolean).
-        reuse: reuse cell
-
-        knowledge_base:
-    '''
-
     def __init__(
             self,
             params: Params,
@@ -78,23 +37,30 @@ class MACCell:
         self.question_lengths = question_lengths
 
         self.knowledge_base = knowledge_base
-        self.dropout = placeholders.dropout
         self.reuse = reuse
         
         self.control_dim = params.model.control_dim
         self.memory_dim = params.model.memory_dim
 
-    ''' 
-    Cell state size. 
-    '''
+        self.iteration = None
+        self.attentions = {"kb": [], "question": [], "self": [], "gate": []}
+        self.autoEncLosses = {"control": tf.constant(0.0), "memory": tf.constant(0.0)}
+
+        self._memory_dropout_mask = self.get_variational_dropout_mask(self.placeholders.dropout_memory)
+
+    def get_variational_dropout_mask(self, rate):
+        randomTensor = tf.to_float(1 - rate)
+        randomTensor += tf.random_uniform((tf.shape(self.knowledge_base)[0], self.memory_dim), minval=0, maxval=1)
+        binaryTensor = tf.floor(randomTensor)
+        return tf.to_float(binaryTensor)
+
+    def apply_variational_dropout_mask(self, inp, mask, rate):
+        ret = (tf.div(inp, tf.to_float(1 - rate))) * mask
+        return ret
 
     @property
     def state_size(self):
         return MACCellTuple(self.control_dim, self.memory_dim)
-
-    '''
-    Cell output size. Currently it doesn't have any outputs. 
-    '''
 
     @property
     def output_size(self):
@@ -138,28 +104,38 @@ class MACCell:
         the continuous (pre-attention) control
         [batch_size, ctrlDim]
     '''
-
-    def control(self, control_input, inWords, outWords, question_lengths,
-                control, contControl=None, name="", reuse=None):
+    def control(
+            self,
+            control_input,
+            question_lengths,
+            control,
+            name="control",
+            reuse=tf.AUTO_REUSE):
         cfg = self.configs.control
-        with tf.variable_scope("control" + name, reuse=reuse):
-            dim = self.control_dim
+        dim = self.control_dim
 
-            ## Step 1: compute "continuous" control state given previous control and question.
+        with tf.variable_scope(name, reuse=reuse):
+            words = self.question_contextual_word_embeddings
+            inWords = outWords = words
+            if cfg.project_input_words or cfg.project_output_words:
+                pWords = ops.linear(words, dim, dim, name="wordsProj")
+                inWords = pWords if cfg.project_input_words else words
+                outWords = pWords if cfg.project_output_words else words
+
+            # Step 1: compute "continuous" control state given previous control and question.
             # control inputs: question and previous control
             newContControl = control_input
-            if cfg.controlFeedPrev:
+            if cfg.feed_previous:
                 newContControl = control if cfg.controlFeedPrevAtt else contControl
                 if cfg.controlFeedInputs:
                     newContControl = tf.concat([newContControl, control_input], axis=-1)
                     dim += self.control_dim
 
                 # merge inputs together
-                newContControl = ops.linear(newContControl, dim, self.control_dim,
-                                            act=cfg.controlContAct, name="contControl")
+                newContControl = ops.linear(newContControl, dim, dim, act=cfg.controlContAct, name="contControl")
                 dim = self.control_dim
 
-            ## Step 2: compute attention distribution over words and sum them up accordingly.
+            # Step 2: compute attention distribution over words and sum them up accordingly.
             # compute interactions with question words
             interactions = tf.expand_dims(newContControl, axis=1) * inWords
 
@@ -174,7 +150,7 @@ class MACCell:
                 dim = self.control_dim
 
             # compute attention distribution over words and summarize them accordingly
-            logits = ops.inter2logits(interactions, dim)
+            logits = ops.linear(interactions, dim, 1, dropout=0., name="logits")
             # self.interL = (interW, interb)
 
             attention = tf.nn.softmax(ops.expMask(logits, question_lengths))
@@ -182,11 +158,7 @@ class MACCell:
 
             new_control = ops.att2Smry(attention, outWords)
 
-            # ablation: use continuous control (pre-attention) instead
-            if cfg.controlContinuous:
-                new_control = newContControl
-
-        return new_control, newContControl
+        return new_control
 
     '''
     The read unit extracts relevant information from the knowledge base given the
@@ -209,22 +181,23 @@ class MACCell:
     [batch_size, memDim]
     '''
 
-    def read(self, knowledge_base, memory, control, name="", reuse=None):
+    def read(self, knowledge_base, memory, control, name="read", reuse=tf.AUTO_REUSE):
         cfg = self.configs.read
-        with tf.variable_scope("read" + name, reuse=reuse):
+        with tf.variable_scope(name, reuse=reuse):
             dim = self.memory_dim
 
-            ## memory dropout
+            # memory dropout
             if self.configs.memory_variational_dropout:
-                memory = ops.applyVarDpMask(memory, self.memDpMask, self.dropout)
+                memory = self.apply_variational_dropout_mask(
+                    memory, self._memory_dropout_mask, self.placeholders.dropout_memory)
             else:
-                memory = tf.nn.dropout(memory, rate=self.dropout)
+                memory = tf.nn.dropout(memory, rate=self.placeholders.dropout_memory)
 
-            ## Step 1: knowledge base / memory interactions
+            # Step 1: knowledge base / memory interactions
             # parameters for knowledge base and memory projection
             proj = None
             if cfg.project_inputs:
-                proj = {"dim": cfg.attention_dim, "shared": cfg.readProjShared, "dropout": self.dropout}
+                proj = {"dim": cfg.attention_dim, "shared": cfg.share_project, "dropout": self.placeholders.dropout_read}
                 dim = cfg.attention_dim
 
             # parameters for concatenating knowledge base elements
@@ -250,7 +223,7 @@ class MACCell:
             else:
                 dim = interDim
 
-            ## Step 2: compute interactions with control
+            # Step 2: compute interactions with control
             if cfg.control:
                 # compute interactions with control
                 if self.control_dim != dim:
@@ -271,12 +244,12 @@ class MACCell:
                     interactions = tf.concat([interactions, addedInp], axis=-1)
                     dim += addedDim
 
-                    # optional nonlinearity
+                # optional non-linearity
                 interactions = get_activation_fn(cfg.activation_fn)(interactions)
 
-            ## Step 3: sum attentions up over the knowledge base
+            # Step 3: sum attentions up over the knowledge base
             # transform vectors to attention distribution
-            attention = ops.inter2att(interactions, dim, dropout=self.dropout)
+            attention = ops.inter2att(interactions, dim, dropout=self.placeholders.dropout_read)
 
             self.attentions["kb"].append(attention)
 
@@ -315,14 +288,21 @@ class MACCell:
     Return the new memory 
     [batch_size, memDim]
     '''
-    def write(self, memory, info, control, contControl=None, name="", reuse=None):
+    def write(
+            self,
+            memory,
+            info,
+            control,
+            controls=None,
+            name="write",
+            reuse=tf.AUTO_REUSE):
         cfg = self.configs.write
-        with tf.variable_scope("write" + name, reuse=reuse):
+        with tf.variable_scope(name, reuse=reuse):
             # optionally project info
             if cfg.project_info:
                 info = ops.linear(info, self.memory_dim, self.memory_dim, name="info")
 
-            # optional info nonlinearity
+            # optional info non-linearity
             info = get_activation_fn(cfg.info_activation_fn)(info)
 
             # compute self-attention vector based on previous controls and memories
@@ -333,11 +313,7 @@ class MACCell:
                 # elif cfg.writeSelfAttMod == "POST":
                 #     selfControl = postControl
                 selfControl = ops.linear(selfControl, self.control_dim, self.control_dim, name="ctrlProj")
-
-                interactions = self.controls * tf.expand_dims(selfControl, axis=1)
-
-                # if cfg.selfAttShareInter:
-                #     selfAttlogits = self.linearP(selfAttInter, cfg.encDim, 1, self.interL[0], self.interL[1], name = "modSelfAttInter")
+                interactions = controls * tf.expand_dims(selfControl, axis=1)
                 attention = ops.inter2att(interactions, self.control_dim, name="selfAttention")
                 self.attentions["self"].append(attention)
                 selfSmry = ops.att2Smry(attention, self.memories)
@@ -349,8 +325,7 @@ class MACCell:
             elif cfg.inputs == "sum":
                 new_memory += info
             elif cfg.inputs == "info_sum":
-                new_memory, dim = ops.concat(new_memory, info, dim, mul=cfg.writeConcatMul)
-            # else: MEM
+                new_memory, dim = ops.concat(new_memory, info, dim)
 
             if cfg.self_attention:
                 new_memory = tf.concat([new_memory, selfSmry], axis=-1)
@@ -403,7 +378,7 @@ class MACCell:
                 interactions, dim = ops.mul(self.question_contextual_word_embeddings, features, self.control_dim,
                                             concat={"x": cfg.autoEncMemCnct}, mulBias=cfg.mulBias, name="aeMem")
 
-                logits = ops.inter2logits(interactions, dim)
+                logits = ops.linear(interactions, dim, 1, dropout=0., name="logits")
                 logits = self.expMask(logits, self.question_lengths)
 
                 # reconstruct word attentions
@@ -419,75 +394,33 @@ class MACCell:
 
         return loss
 
-    '''
-    Call the cell to get new control and memory states.
-
-    Args:
-        inputs: in the current implementation the cell don't get recurrent inputs
-        every iteration (argument for comparability with rnn interface).
-
-        state: the cell current state (control, memory)
-        MACCellTuple([batch_size, ctrlDim],[batch_size, memDim])
-
-    Returns the new state -- the new memory and control values.
-    MACCellTuple([batch_size, ctrlDim],[batch_size, memDim])
-    '''
-
-    def __call__(self, state, scope=None):
+    def __call__(self, controls, memories, scope=None):
         cfg = self.configs
         scope = scope or type(self).__name__
+        dim = self.control_dim
+
         with tf.variable_scope(scope, reuse=self.reuse):  # as tfscope
-            control = state.control
-            memory = state.memory
-
-            # cell sharing
-            inputName = "qInput"
-            inputNameU = "qInputU"
-            inputReuseU = inputReuse = (self.iteration > 0)
-            if not cfg.control.share_input_layer:
-                inputNameU = "qInput%d" % self.iteration
-                inputReuseU = None
-
-            cellName = ""
-            cellReuse = (self.iteration > 0)
-            if cfg.unsharedCells:
-                cellName = str(self.iteration)
-                cellReuse = None
+            control = controls[-1]
+            memory = memories[-1]
 
             # control unit
-            # prepare question input to control
-            control_input = ops.linear(
-                self.question_embeddings, self.control_dim, self.control_dim,
-                name=inputName, reuse=inputReuse)
-
+            control_input = ops.linear(self.question_embeddings, dim, dim, reuse=self.iteration > 0)
             control_input = get_activation_fn(cfg.control.input_activation_fn)(control_input)
+            if cfg.control.share_input_layer:
+                control_input = ops.linear(control_input, dim, dim, reuse=self.iteration > 0)
+            else:
+                control_input = ops.linear(control_input, dim, dim, name=f"linear_{self.iteration}")
 
-            control_input = ops.linear(
-                control_input, self.control_dim, self.control_dim,
-                name=inputNameU, reuse=inputReuseU)
+            # control
+            new_control = self.control(control_input, self.question_lengths, control)
 
-            new_control, self.contControl = self.control(
-                control_input, self.inWords, self.outWords,
-                self.question_lengths, control, self.contControl, name=cellName, reuse=cellReuse)
+            # read
+            info = self.read(self.knowledge_base, memory, new_control)
 
-            info = self.read(self.knowledge_base, memory, new_control, name=cellName, reuse=cellReuse)
-            info = tf.nn.dropout(info, rate=self.dropout)
-            new_memory = self.write(memory, info, new_control, self.contControl, name=cellName, reuse=cellReuse)
-
-            # add auto encoder loss for memory
-            # if cfg.autoEncMem:
-            #     self.autoEncLosses["memory"] += memAutoEnc(new_memory, info, new_control)
-
-            # append as standard list?
-            self.controls = tf.concat([self.controls, tf.expand_dims(new_control, axis=1)], axis=1)
-            self.memories = tf.concat([self.memories, tf.expand_dims(new_memory, axis=1)], axis=1)
-            self.infos = tf.concat([self.infos, tf.expand_dims(info, axis=1)], axis=1)
-
-            # self.contControls = tf.concat([self.contControls, tf.expand_dims(contControl, axis = 1)], axis = 1)
-            # self.postControls = tf.concat([self.controls, tf.expand_dims(postControls, axis = 1)], axis = 1)
-
-        newState = MACCellTuple(new_control, new_memory)
-        return newState
+            # write
+            info = tf.nn.dropout(info, rate=self.placeholders.dropout_write)
+            new_memory = self.write(memory, info, new_control)
+        return new_control, new_memory
 
     '''
     Initializes the a hidden state to based on the value of the initType:
@@ -503,75 +436,17 @@ class MACCell:
 
     Returns the initialized hidden state.
     '''
-
-    def initState(self, name, dim, initType, batch_size):
-        if initType == "PRM":
-            prm = tf.get_variable(name, shape=(dim,),
-                                  initializer=tf.random_normal_initializer())
-            initState = tf.tile(tf.expand_dims(prm, axis=0), [batch_size, 1])
-        elif initType == "ZERO":
-            initState = tf.zeros((batch_size, dim), dtype=tf.float32)
-        else:  # "Q"
-            initState = self.question_embeddings
-        return initState
-
-    '''
-    Initializes the cell internal state (currently it's stateful). In particular,
-    1. Data-structures (lists of attention maps and accumulated losses).
-    2. The memory and control states.
-    3. The knowledge base (optionally merging it with the question vectors)
-    4. The question words used by the cell (either the original word embeddings, or the 
-       encoder outputs, with optional projection).
-
-    Args:
-        batch_size: the batch size
-
-    Returns the initial cell state.
-    '''
-
-    def zero_state(self, batch_size):
-        cfg = self.configs
-        ## initialize data-structures
-        self.attentions = {"kb": [], "question": [], "self": [], "gate": []}
-        self.autoEncLosses = {"control": tf.constant(0.0), "memory": tf.constant(0.0)}
-
-        ## initialize state
-        initialControl = self.initState("initCtrl", self.control_dim, cfg.control_init, batch_size)
-        initialMemory = self.initState("initMem", self.memory_dim, cfg.memory_init, batch_size)
-
-        self.controls = tf.expand_dims(initialControl, axis=1)
-        self.memories = tf.expand_dims(initialMemory, axis=1)
-        self.infos = tf.expand_dims(initialMemory, axis=1)
-
-        self.contControl = initialControl
-        # self.contControls = tf.expand_dims(initialControl, axis = 1)
-        # self.postControls = tf.expand_dims(initialControl, axis = 1)
-
-        ## initialize knowledge base
-        # optionally merge question into knowledge base representation
-        if cfg.initKBwithQ is not None:
-            iVecQuestions = ops.linear(self.question_embeddings, self.control_dim, self.memory_dim, name="questions")
-
-            concatMul = (cfg.initKBwithQ == "MUL")
-            cnct, dim = ops.concat(self.knowledge_base, iVecQuestions, self.memory_dim, mul=concatMul, expandY=True)
-            self.knowledge_base = ops.linear(cnct, dim, self.memory_dim, name="initKB")
-
-        # initialize question words
-        # choose question words to work with (original embeddings or encoder outputs)
-        words = self.question_contextual_word_embeddings
-
-        # project words
-        self.inWords = self.outWords = words
-        if cfg.controlInWordsProj or cfg.controlOutWordsProj:
-            pWords = ops.linear(words, self.control_dim, self.control_dim, name="wordsProj")
-            self.inWords = pWords if cfg.controlInWordsProj else words
-            self.outWords = pWords if cfg.controlOutWordsProj else words
-
-        # initialize memory variational dropout mask
-        if self.configs.memory_variational_dropout:
-            self.memDpMask = ops.generateVarDpMask((batch_size, self.memory_dim), self.dropout)
-
-        return MACCellTuple(initialControl, initialMemory)
+    def init_state(self, name, dim, init_type, batch_size):
+        if init_type == "prm":
+            prm = tf.get_variable(name, shape=(dim,), initializer=tf.random_normal_initializer())
+            init_state = tf.tile(tf.expand_dims(prm, axis=0), [batch_size, 1])
+        elif init_type == "zero":
+            init_state = tf.zeros((batch_size, dim), dtype=tf.float32)
+        elif init_type == "questions":
+            init_state = self.question_embeddings
+        else:
+            raise ValueError
+        return init_state
 
 
 class MAC(BaseModelV1):
@@ -587,13 +462,43 @@ class MAC(BaseModelV1):
                 questions=tf.placeholder(tf.int32, shape=(None, None)),
                 question_lengths=tf.placeholder(tf.int32, shape=(None,)),
                 answers=tf.placeholder(tf.int32, shape=(None,)),
-                dropout=tf.placeholder(tf.float32, shape=(), name="dropout")
+                dropout_read=tf.placeholder(tf.float32, shape=(), name="dropout_read"),
+                dropout_memory=tf.placeholder(tf.float32, shape=(), name="dropout_memory"),
+                dropout_write=tf.placeholder(tf.float32, shape=(), name="dropout_write"),
+                dropout_question=tf.placeholder(tf.float32, shape=(), name="dropout_question"),
+                dropout_stem=tf.placeholder(tf.float32, shape=(), name="dropout_stem"),
+                dropout_encoder_state=tf.placeholder(tf.float32, shape=(), name="dropout_encoder_state"),
+                dropout_encoder_input=tf.placeholder(tf.float32, shape=(), name="dropout_encoder_input"),
+                dropout_classifier=tf.placeholder(tf.float32, shape=(), name="dropout_classifier")
             )
 
         # batch norm params
-        self.batchNorm = {"decay": self.configs.batch_norm_decay, "train": self.is_training}
+        self.batch_norm = {"decay": self.configs.batch_norm_decay, "train": self.is_training}
         self.control_dim = params.model.control_dim
         self.memory_dim = params.model.memory_dim
+
+    def populate_feed_dict(self, feed_dict: Dict[tf.placeholder, Any], is_training):
+        cfg = self.configs
+        ph = self.placeholders
+        if is_training:
+            feed_dict[ph.dropout_read] = cfg.mac.read.dropout or cfg.dropout
+            feed_dict[ph.dropout_write] = cfg.mac.write.dropout or cfg.dropout
+            feed_dict[ph.dropout_encoder_input] = cfg.encoder.dropout_input or cfg.dropout
+            feed_dict[ph.dropout_encoder_state] = cfg.encoder.dropout_state or cfg.dropout
+            feed_dict[ph.dropout_question] = cfg.encoder.dropout_question or cfg.dropout
+            feed_dict[ph.dropout_stem] = cfg.stem.dropout or cfg.dropout
+            feed_dict[ph.dropout_classifier] = cfg.classifier.dropout or cfg.dropout
+            feed_dict[ph.dropout_memory] = cfg.mac.read.dropout_memory or cfg.dropout
+        else:
+            feed_dict[ph.dropout_read] = 0.
+            feed_dict[ph.dropout_write] = 0.
+            feed_dict[ph.dropout_encoder_input] = 0.
+            feed_dict[ph.dropout_encoder_state] = 0.
+            feed_dict[ph.dropout_question] = 0.
+            feed_dict[ph.dropout_stem] = 0.
+            feed_dict[ph.dropout_classifier] = 0.
+            feed_dict[ph.dropout_memory] = 0.
+        return super().populate_feed_dict(feed_dict, is_training)
 
     '''
     The Image Input Unit (stem). Passes the image features through a CNN-network
@@ -632,7 +537,7 @@ class MAC(BaseModelV1):
                 features = multi_layer_cnn(
                     images, dims,
                     batch_norm=self.configs.stem.batch_norm,
-                    dropout=self.placeholders.dropout,
+                    dropout=self.placeholders.dropout_stem,
                     kernel_sizes=cfg.kernel_sizes or cfg.kernel_size,
                     strides=cfg.stride_sizes or 1)
 
@@ -667,124 +572,51 @@ class MAC(BaseModelV1):
                 question_word_embeddings = tf.nn.embedding_lookup(question_embedding_table, question_word_ids)
                 return question_word_embeddings, question_embedding_table, None  # answer_embedding_table
 
-    '''
-    The Question Input Unit embeds the questions to randomly-initialized word vectors,
-    and runs a recurrent bidirectional encoder (RNN/LSTM etc.) that gives back
-    vector representations for each question (the RNN final hidden state), and
-    representations for each of the question words (the RNN outputs for each word). 
-
-    The method uses bidirectional LSTM, by default.
-    Optionally projects the outputs of the LSTM (with linear projection / 
-    optionally with some activation).
-    
-    Args:
-        questions: question word embeddings  
-        [batchSize, questionLength, wordEmbDim]
-
-        questionLengths: the question lengths.
-        [batchSize]
-
-        projWords: True to apply projection on RNN outputs.
-        projQuestion: True to apply projection on final RNN state.
-        projDim: projection dimension in case projection is applied.  
-
-    Returns:
-        Contextual Words: RNN outputs for the words.
-        [batchSize, questionLength, ctrlDim]
-
-        Vectorized Question: Final hidden state representing the whole question.
-        [batchSize, ctrlDim]
-    '''
-    def build_encoder(self, questions, question_lengths, projWords=False,
-                projQuestion=False, projDim=None):
+    def build_encoder(self, questions, question_lengths):
         cfg = self.configs.encoder
+        dim = self.control_dim
         with tf.variable_scope("encoder"):
             # variational dropout option
             varDp = None
-            if cfg.encVariationalDropout:
-                varDp = {"stateDp": self.placeholders.dropout,
-                         "inputDp": self.placeholders.dropout,
+            if cfg.variational_dropout:
+                varDp = {"stateDp": self.placeholders.dropout_encoder_state,
+                         "inputDp": self.placeholders.dropout_encoder_input,
                          "inputSize": self.configs.embedding.dim}
 
-            # rnns
             for i in range(cfg.num_layers):
-                question_contextual_word_embeddings, question_embeddings = ops.RNNLayer(
+                question_contextual_word_embeddings, question_embeddings = ops.rnn_layer(
                     questions, question_lengths,
-                    cfg.dim, bi=cfg.bidirectional, cellType=cfg.type,
-                    dropout=self.placeholders.dropout, varDp=varDp,
-                    name="rnn%d" % i)
+                    cfg.dim, bidirectional=cfg.bidirectional, cell_type=cfg.type,
+                    dropout=self.placeholders.dropout_encoder_input,
+                    varDp=varDp,
+                    name=f"{cfg.type.lower()}_{i}")
 
             # dropout for the question vector
-            question_embeddings = tf.nn.dropout(question_embeddings, rate=self.placeholders.dropout)
+            question_embeddings = tf.nn.dropout(question_embeddings, rate=self.placeholders.dropout_question)
 
             # projection of encoder outputs 
-            if projWords:
-                question_contextual_word_embeddings = ops.linear(question_contextual_word_embeddings, cfg.dim, projDim,
-                                               name="projCW")
-            if projQuestion:
-                question_embeddings = ops.linear(
-                    question_embeddings, cfg.dim, projDim,
-                    act=cfg.encProjQAct, name="projQ")
+            if (cfg.dim != dim) or cfg.project:
+                question_contextual_word_embeddings = ops.linear(
+                    question_contextual_word_embeddings, cfg.dim, dim, name="projCW")
+                question_embeddings = ops.linear(question_embeddings, cfg.dim, dim, act=cfg.encProjQAct, name="projQ")
 
         return question_contextual_word_embeddings, question_embeddings
 
-    '''
-    Runs the MAC recurrent network to perform the reasoning process.
-    Initializes a MAC cell and runs netLength iterations.
-    
-    Currently it passes the question and knowledge base to the cell during
-    its creating, such that it doesn't need to interact with it through 
-    inputs / outputs while running. The recurrent computation happens 
-    by working iteratively over the hidden (control, memory) states.  
-    
-    Args:
-        images: flattened image features. Used as the "Knowledge Base".
-        (Received by default model behavior from the Image Input Units).
-        [batchSize, H * W, memDim]
-
-        question_embeddings: vector questions representations.
-        (Received by default model behavior from the Question Input Units
-        as the final RNN state).
-        [batchSize, ctrlDim]
-
-        questionWords: question word embeddings.
-        [batchSize, questionLength, ctrlDim]
-
-        question_contextual_word_embeddings: question contextual words.
-        (Received by default model behavior from the Question Input Units
-        as the series of RNN output states).
-        [batchSize, questionLength, ctrlDim]
-
-        questionLengths: question lengths.
-        [batchSize]
-
-    Returns the final control state and memory state resulted from the network.
-    ([batchSize, ctrlDim], [bathSize, memDim])
-    '''
     def build_mac(
             self,
             question_embeddings,
             question_word_embeddings,
             question_contextual_word_embeddings,
             question_lengths,
-            knowledge_base,
-            name="",
-            reuse=None):
+            knowledge_base):
         cfg = self.configs.mac
         batch_size = tf.shape(question_lengths)[0]
-        with tf.variable_scope("mac" + name, reuse=reuse):
-            # initialize knowledge base
-            # optionally merge question into knowledge base representation
-            if cfg.initKBwithQ is not None:
+        with tf.variable_scope("mac"):
+            if cfg.init_knowledge_base_with_question:
                 iVecQuestions = ops.linear(question_embeddings, self.control_dim, self.memory_dim, name="questions")
-
-                concatMul = (cfg.initKBwithQ == "MUL")
+                concatMul = (cfg.init_knowledge_base_with_question == "mul")
                 cnct, dim = ops.concat(knowledge_base, iVecQuestions, self.memory_dim, mul=concatMul, expandY=True)
                 knowledge_base = ops.linear(cnct, dim, self.memory_dim, name="initKB")
-
-            # initialize memory variational dropout mask
-            if self.configs.mac.memory_variational_dropout:
-                self.memDpMask = ops.generateVarDpMask((batch_size, self.memory_dim), self.placeholders.dropout)
 
             mac_cell = MACCell(
                 self.params,
@@ -793,29 +625,34 @@ class MAC(BaseModelV1):
                 question_word_embeddings,
                 question_contextual_word_embeddings,
                 question_lengths,
-                knowledge_base,
-                reuse=reuse)
+                knowledge_base)
 
-            state = mac_cell.zero_state(batch_size)
+            initial_control = mac_cell.init_state("init_control", self.control_dim, cfg.init_control, batch_size)
+            initial_memory = mac_cell.init_state("init_memory", self.memory_dim, cfg.init_memory, batch_size)
+
+            controls = [initial_control]
+            memories = [initial_memory]
 
             for i in range(self.configs.max_step):
                 mac_cell.iteration = i
-                state = mac_cell(state)
+                new_control, new_memory = mac_cell(controls, memories)
+                controls.append(new_control)
+                memories.append(new_memory)
 
-            final_control = state.control
-            final_memory = state.memory
+            final_control = controls[-1]
+            final_memory = memories[-1]
 
         return final_control, final_memory
 
     def build_output(self, memory, question_embeddings, images):
         cfg = self.configs.classifier
-        with tf.variable_scope("outputUnit"):
+        with tf.variable_scope("output"):
             features = memory
             dim = self.memory_dim
 
             if cfg.use_question:
-                eVecQuestions = ops.linear(question_embeddings, self.control_dim, self.memory_dim, name="outQuestion")
-                features, dim = ops.concat(features, eVecQuestions, self.memory_dim, mul=cfg.outQuestionMul)
+                q_emb = ops.linear(question_embeddings, self.control_dim, dim, name="question_linear")
+                features, dim = ops.concat(features, q_emb, dim)
 
             if cfg.use_image:
                 images, imagesDim = ops.linearizeFeatures(
@@ -824,62 +661,41 @@ class MAC(BaseModelV1):
                     self.configs.image.output_width,
                     self.configs.image.output_num_channels,
                     outDim=cfg.image_output_dim)
-                images = ops.linear(images, self.memory_dim, cfg.image_output_dim, name="outImage")
+                images = ops.linear(images, dim, cfg.image_output_dim, name="outImage")
                 features = tf.concat([features, images], axis=-1)
                 dim += cfg.outImageDim
 
         return features, dim
 
-    '''
-    Output Unit (step 2): Computes the logits for the answers. Passes the features
-    through fully-connected network to get the logits over the possible answers.
-    Optionally uses answer word embeddings in computing the logits (by default, it doesn't).
-
-    Args:
-        features: features used to compute logits
-        [batchSize, inDim]
-
-        inDim: features dimension
-
-        aEmbedding: supported word embeddings for answer words in case answerMod is not NON.
-        Optionally computes logits by computing dot-product with answer embeddings.
-    
-    Returns: the computed logits.
-    [batchSize, answerWordsNum]
-    '''
     def build_classifier(self, features, input_dim: int, aEmbeddings=None):
         cfg = self.configs.classifier
         with tf.variable_scope("classifier"):
             dims = [input_dim] + cfg.dims + [self.dataset.num_classes]
-            if cfg.answerMod is not None:
-                dims[-1] = cfg.wrdEmbDim
+            if cfg.answer_embedding:
+                dims[-1] = self.configs.embedding.dim
 
-            logits = ops.FCLayer(
+            logits = ops.linear_layers(
                 features, dims,
-                batchNorm=self.batchNorm if cfg.outputBN else None,
-                dropout=self.placeholders.dropout)
+                batchNorm=self.batch_norm if cfg.batch_norm else None,
+                dropout=self.placeholders.dropout_classifier,
+                act="elu")
 
-            if cfg.answerMod is not None:
-                logits = tf.nn.dropout(logits, rate=self.placeholders.dropout)
-                interactions = ops.mul(aEmbeddings, logits, dims[-1], interMod=cfg.answerMod)
-                logits = ops.inter2logits(interactions, dims[-1], sumMod="SUM")
+            if cfg.answer_embedding:
+                logits = tf.nn.dropout(logits, rate=self.placeholders.dropout_classifier)
+                interactions = ops.mul(aEmbeddings, logits, dims[-1], interMod=cfg.answer_embedding)
+                # logits = ops.inter2logits(interactions, dims[-1], sumMod="SUM")
                 logits += ops.getBias((outputDim,), "ans")
 
         return logits
 
     def build(self, batch):
-        cfg = self.configs
         images = tf.transpose(batch.images, (0, 2, 3, 1))
         # embed questions words (and optionally answer words)
         question_word_embeddings, qEmbeddings, aEmbeddings = self.build_embeddings(batch.questions)
 
-        projWords = projQuestion = ((cfg.encoder.dim != self.control_dim) or cfg.encoder.project)
         question_contextual_word_embeddings, question_embeddings = self.build_encoder(
             question_word_embeddings,
-            batch.question_lengths,
-            projWords,
-            projQuestion,
-            self.control_dim)
+            batch.question_lengths)
 
         # Image Input Unit (stem)
         image_features = self.stem(images, self.configs.image.output_num_channels, self.memory_dim)
@@ -897,14 +713,6 @@ class MAC(BaseModelV1):
 
         return logits, preds
 
-    def populate_feed_dict(self, feed_dict: Dict[tf.placeholder, Any], is_training):
-        cfg = self.configs
-        if is_training:
-            feed_dict[self.placeholders.dropout] = cfg.dropout
-        else:
-            feed_dict[self.placeholders.dropout] = 0.0
-        return super().populate_feed_dict(feed_dict, is_training)
-
     @property
     def references(self):
         return self.placeholders.answers
@@ -915,11 +723,10 @@ class MAC(BaseModelV1):
             loss = tf.reduce_mean(losses)
         return loss
 
-    def get_metric_ops(self):
-        return dict(
-            **super().get_metric_ops(),
-            acc=tf.metrics.accuracy(self.references, self.predictions))
-
     @property
     def batch_size(self):
         return tf.shape(self.placeholders.question_lengths)[0]
+
+    def get_metrics(self):
+        return dict(
+            acc=tf.metrics.accuracy(self.references, self.predictions))

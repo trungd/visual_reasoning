@@ -4,7 +4,7 @@ from dlex import Params
 from dlex.datasets.torch import Dataset
 from dlex.torch import Batch
 from dlex.torch.models import ClassificationModel
-from dlex.torch.utils.model_utils import MultiLinear
+from dlex.torch.utils.model_utils import MultiLinear, RNN
 from torch import nn
 from torch.nn.init import kaiming_uniform_, xavier_uniform_
 
@@ -14,7 +14,6 @@ def linear(in_dim, out_dim, bias=True):
     xavier_uniform_(lin.weight)
     if bias:
         lin.bias.data.zero_()
-
     return lin
 
 
@@ -22,7 +21,7 @@ class ControlUnit(nn.Module):
     def __init__(self, dim, max_step):
         super().__init__()
 
-        self.position_aware = nn.ModuleList(linear(dim * 2, dim) for _ in range(max_step))
+        self.position_aware = nn.ModuleList(linear(dim, dim) for _ in range(max_step))
         self.control_question = linear(dim * 2, dim)
         self.attn = linear(dim, 1)
 
@@ -109,7 +108,7 @@ class WriteUnit(nn.Module):
 
         if self.memory_gate:
             control = self.control(controls[-1])
-            gate = F.sigmoid(control)
+            gate = torch.sigmoid(control)
             m = gate * m_prev + (1 - gate) * m
 
         return m
@@ -187,10 +186,12 @@ class MAC(ClassificationModel):
             nn.ELU())
 
         self.embed = nn.Embedding(dataset.vocab_size, cfg.embed_dim)
-        self.lstm = nn.LSTM(
-            cfg.embed_dim, cfg.dim,
-            batch_first=True, bidirectional=True)
-        self.lstm_proj = nn.Linear(cfg.dim * 2, cfg.dim)
+        self.encoder = RNN(
+            cfg.encoder.type,
+            cfg.embed_dim,
+            cfg.dim,
+            bidirectional=cfg.encoder.bidirectional)
+        self.lstm_proj = nn.Linear(cfg.dim, cfg.dim)
 
         # MAC Unit
         self.mac = MACUnit(
@@ -201,8 +202,9 @@ class MAC(ClassificationModel):
             cfg.dropout)
 
         # Output Unit
+        output_dim = cfg.dim + (cfg.dim if cfg.classifier.use_question else 0)
         self.linear = MultiLinear(
-            [cfg.dim * 3, cfg.dim, dataset.num_classes],
+            [output_dim] + cfg.classifier.dims + [dataset.num_classes],
             dropout=cfg.dropout,
             norm_layer=None,
             activation_fn='elu')
@@ -224,11 +226,8 @@ class MAC(ClassificationModel):
 
     def encode_question(self, question, question_len):
         embed = self.embed(question)
-        embed = nn.utils.rnn.pack_padded_sequence(embed, question_len, batch_first=True)
-        c, (h, _) = self.lstm(embed)
-        c, _ = nn.utils.rnn.pad_packed_sequence(c, batch_first=True)
+        c, h = self.encoder(embed, question_len)
         c = self.lstm_proj(c)
-        h = h.permute(1, 0, 2).contiguous().view(question.shape[0], -1)
         return c, h
 
     def forward(self, batch: Batch):
@@ -242,7 +241,11 @@ class MAC(ClassificationModel):
         final_memory = self.mac(c, h, img)
 
         # Output Unit
-        out = torch.cat([final_memory, h], 1)
+        if self.configs.classifier.use_question:
+            out = torch.cat([final_memory, h], 1)
+        else:
+            out = final_memory
+
         out = self.linear(out)
 
         return out

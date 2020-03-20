@@ -21,19 +21,24 @@ model:
     bidirectional: true
     dropout: 0.15
     project: false
+    dropout_input: 0.15
+    dropout_state: 0.
+    dropout_question: 0.08
+    variational_dropout: false
   mac:
-    memory_init: prm
-    control_init: questions
-    init_knowledge_base: false
+    init_memory: prm
+    init_control: questions
+    init_knowledge_base_with_question: false
     memory_variational_dropout: true
     control:
-      share_input_layer: true
+      share_input_layer: false
+      feed_previous: false
       activation_fn: none
       input_activation_fn: tanh
-
       concat_words: false
-
       project: false
+      project_input_words: false
+      project_output_words: false
       project_activation_fn: none
     read:
       control: true
@@ -41,14 +46,16 @@ model:
       control_concat_knowledge_base: false
       control_concat_projection: false
       control_concat_interactions: false
-
       memory_concat_knowledge_base: true
       memory_concat_projection: true
       activation_fn: elu
       project_inputs: true
       project_memory: true
+      share_project: false
       attention_type: mul
       attention_dim: 512
+      dropout: 0.15
+      dropout_memory: 0.15
     write:
       inputs: info_sum
       activation_fn: none
@@ -60,6 +67,7 @@ model:
       project_info: false
       merge_control: false
       memory_gate: false
+      dropout: 0.
   dim: 512
   control_dim: 512
   memory_dim: 512
@@ -71,6 +79,7 @@ model:
     kernel_size: 3
     location_aware: false
     linear: false
+    dropout: 0.18
   embed_dim: 300
   max_step: 4
   self_attention: true
@@ -82,6 +91,9 @@ model:
     use_question: true
     use_image: false
     image_output_dim: 1024
+    dropout: 0.15
+    batch_norm: false
+    answer_embedding: false
   batch_norm_decay: 0.999
   batch_norm_center: false
   batch_norm_scale: false
@@ -92,19 +104,21 @@ dataset:
   shuffle: true
 train:
   valid_set: val
-  num_epochs: 50
-  batch_size: 64
+  num_epochs: 30
+  batch_size: 256
   optimizer:
     name: adam
     lr: 0.0001
   lr_scheduler:
-    decay_steps: 3
+    type: exponential
+    decay_start: 5
+    decay_steps: 5
     decay_rate: 0.5
+    # milestones: [10, 15, 20]
   save_every: 1e
-  log_every: 0.1e
-  max_grad_norm: 5
-  ema_decay_rate: 0.999
+  max_grad_norm: 8
+  # ema_decay_rate: 0.999
 test:
-  test_sets: [test]
+  test_sets: [val]
   log_every: 5s
   metrics: [acc]
