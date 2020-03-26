@@ -1,3 +1,4 @@
+from collections import namedtuple
 from typing import Tuple, List
 
 import h5py
@@ -8,6 +9,9 @@ from dlex.datasets.nlp.utils import Vocab
 from dlex.datasets.torch import Dataset
 from dlex.torch import Batch
 from dlex.torch.utils.variable_length_tensor import pad_sequence
+
+
+BatchX = namedtuple("BatchX", "images questions question_lengths objects object_lengths")
 
 
 class PytorchCLEVR(Dataset):
@@ -73,10 +77,10 @@ class PytorchCLEVR(Dataset):
     def collate_fn(self, batch: List[Tuple]):
         batch = sorted(batch, key=lambda x: len(x[1]), reverse=True)
         imgs, qs, ans = [[b[i] for b in batch] for i in range(3)]
-        qs, qlen = pad_sequence(qs, self.vocab.blank_token_idx, True)
+        qs, qlen = pad_sequence(qs, self.vocab.blank_token_idx, output_tensor=True)
 
         return Batch(
-            X=(self.maybe_cuda(torch.stack(imgs)), qs, qlen),
+            X=BatchX(self.maybe_cuda(torch.stack(imgs)), qs, qlen, None, None),
             Y=self.maybe_cuda(torch.LongTensor(ans)))
 
     def format_output(self, y_pred, batch_input) -> (str, str, str):

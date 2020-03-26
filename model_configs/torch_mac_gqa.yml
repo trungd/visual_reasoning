@@ -1,0 +1,76 @@
+backend: pytorch
+env:
+  bert:
+    params:
+      model:
+        encoder:
+          type: bert
+          dim: 768
+      dataset:
+        bert_tokenizer: true
+        bert_features: false
+        object_features: false
+        spatial_features: true
+  bert_features:
+    params:
+      model:
+        dim: 256
+        encoder:
+          type: input
+          dim: 768
+      dataset:
+        bert_features: true
+        object_features: false
+        spatial_features: true
+      train:
+        batch_size: 256
+  lstm:
+    params:
+      model:
+        encoder:
+          type: lstm
+          dim: 512
+          project: false
+          bidirectional: true
+      dataset:
+        bert_features: false
+        object_features: false
+        spatial_features: true
+        size: 1000
+model:
+  name: src.torch.models.MAC
+  dim: 512
+  embed_dim: 300
+  max_step: 4
+  image:
+    num_channels: 2048
+  encoder:
+    # type: none
+    type: bert
+    dim: 768
+  write:
+    self_attention: false
+    memory_gate: false
+  classifier:
+    dims: [512]
+    use_question: true
+  dropout: 0.15
+dataset:
+  name: src.gqa.GQA
+  shuffle: false
+train:
+  # valid_set: valid
+  num_epochs: 25
+  batch_size: 128
+  optimizer:
+    name: adam
+    lr: 0.0001
+  lr_scheduler:
+    milestones: [4, 6, 8]
+    gamma: 0.5
+  log_every: 0.1e
+  save_every: 1e
+test:
+  test_sets: [train]
+  log_every: 5s
+  output: true

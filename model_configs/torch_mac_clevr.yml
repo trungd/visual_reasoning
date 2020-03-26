@@ -4,8 +4,10 @@ model:
   dim: 512
   embed_dim: 300
   max_step: 4
+  image:
+    num_channels: 1024
   encoder:
-    type: lstm
+    type: transformer
     dim: 512
     bidirectional: true
   write:
@@ -20,7 +22,7 @@ dataset:
 train:
   valid_set: valid
   num_epochs: 25
-  batch_size: 128
+  batch_size: 32
   optimizer:
     name: adam
     lr: 0.0001

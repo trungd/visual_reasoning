@@ -1,0 +1,53 @@
+backend: pytorch
+env:
+  lstm:
+    params:
+      model:
+        encoder:
+          type: lstm
+          dim: 512
+          project: false
+          bidirectional: true
+      dataset:
+        bert_features: false
+        object_features: true
+        spatial_features: false
+        # size: 1000
+model:
+  name: src.torch.models.BAN
+  dim: 512
+  embed_dim: 300
+  glimpse: 4
+  object_dim: 2048
+  num_objects: 10
+  image:
+    num_channels: 2048
+  encoder:
+    # type: none
+    type: bert
+    dim: 768
+  write:
+    self_attention: false
+    memory_gate: false
+  classifier:
+    dims: [512]
+    use_question: true
+  dropout: 0.15
+dataset:
+  name: src.gqa.GQA
+  shuffle: false
+train:
+  # valid_set: valid
+  num_epochs: 25
+  batch_size: 64
+  optimizer:
+    name: adam
+    lr: 0.0001
+  lr_scheduler:
+    milestones: [4, 6, 8]
+    gamma: 0.5
+  log_every: 0.1e
+  save_every: 1e
+test:
+  test_sets: [testdev]
+  log_every: 5s

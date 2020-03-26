@@ -1,10 +1,15 @@
+from collections import namedtuple
+
 import torch
 import torch.nn.functional as F
 from dlex import Params
 from dlex.datasets.torch import Dataset
 from dlex.torch import Batch
 from dlex.torch.models import ClassificationModel
-from dlex.torch.utils.model_utils import MultiLinear, RNN
+from dlex.torch.utils.model_utils import MultiLinear
+from .encoder import Encoder
+
+from ...datatypes import BatchX
 from torch import nn
 from torch.nn.init import kaiming_uniform_, xavier_uniform_
 
@@ -180,18 +185,25 @@ class MAC(ClassificationModel):
 
         # Input Unit
         self.conv = nn.Sequential(
-            nn.Conv2d(1024, cfg.dim, 3, padding=1),
+            nn.Conv2d(cfg.image.num_channels, cfg.dim, 3, padding=1),
             nn.ELU(),
             nn.Conv2d(cfg.dim, cfg.dim, 3, padding=1),
             nn.ELU())
 
-        self.embed = nn.Embedding(dataset.vocab_size, cfg.embed_dim)
-        self.encoder = RNN(
-            cfg.encoder.type,
-            cfg.embed_dim,
-            cfg.dim,
-            bidirectional=cfg.encoder.bidirectional)
-        self.lstm_proj = nn.Linear(cfg.dim, cfg.dim)
+        if cfg.encoder.type == "input":
+            self.encoder = None
+            self.encoder_output_linear = nn.Linear(cfg.encoder.dim, cfg.dim)
+            self.encoder_state_linear = nn.Linear(cfg.encoder.dim, cfg.dim)
+        else:
+            self.encoder = Encoder(
+                cfg.encoder.type,
+                vocab_size=dataset.vocab_size,
+                embed_dim=cfg.embed_dim,
+                encoder_dim=cfg.encoder.dim,
+                output_dim=cfg.dim,
+                dropout=cfg.dropout,
+                bidirectional=cfg.encoder.bidirectional,
+                project=cfg.encoder.project)
 
         # MAC Unit
         self.mac = MACUnit(
@@ -209,10 +221,13 @@ class MAC(ClassificationModel):
             norm_layer=None,
             activation_fn='elu')
 
+        self.dropout = nn.Dropout(cfg.dropout)
+
         self.reset()
 
     def reset(self):
-        self.embed.weight.data.uniform_(0, 1)
+        if self.encoder:
+            self.encoder.reset()
         kaiming_uniform_(self.conv[0].weight)
         self.conv[0].bias.data.zero_()
         kaiming_uniform_(self.conv[2].weight)
@@ -224,18 +239,18 @@ class MAC(ClassificationModel):
         img = img.view(img.shape[0], self.configs.dim, -1)
         return img
 
-    def encode_question(self, question, question_len):
-        embed = self.embed(question)
-        c, h = self.encoder(embed, question_len)
-        c = self.lstm_proj(c)
-        return c, h
-
     def forward(self, batch: Batch):
-        image, question, question_len = batch.X
+        bx = BatchX(*self.to_cuda_tensors(batch.X))
 
         # Input Unit
-        img = self.encode_image(image)
-        c, h = self.encode_question(question, question_len)
+        img = self.encode_image(bx.images)
+        if self.encoder:
+            c, h = self.encoder(bx.questions, bx.question_lengths)
+        else:
+            c = bx.question_bert_outputs
+            h = bx.question_bert_states
+            h = self.encoder_state_linear(h)
+            c = self.encoder_output_linear(c)
 
         # MAC Cell
         final_memory = self.mac(c, h, img)
@@ -247,5 +262,4 @@ class MAC(ClassificationModel):
             out = final_memory
 
         out = self.linear(out)
-
         return out

@@ -4,12 +4,14 @@ import re
 import subprocess
 
 import h5py
+import numpy as np
 from dlex import Params, logger, List
 from dlex.datasets import DatasetBuilder
 from dlex.datasets.nlp.utils import write_vocab, nltk_tokenize
 from tqdm import tqdm
 
-from .tf.gqa import TensorflowGQA
+from .tf.datasets.gqa import TensorflowGQA
+from .torch.datasets.gqa import PytorchGQA
 
 
 def tokenize(s: str) -> List[str]:
@@ -25,9 +27,9 @@ class GQA(DatasetBuilder):
             [
                 "https://nlp.stanford.edu/data/gqa/sceneGraphs.zip",
                 "https://nlp.stanford.edu/data/gqa/questions1.2.zip",
-                "https://nlp.stanford.edu/data/gqa/allImages.zip",
+                # "https://nlp.stanford.edu/data/gqa/allImages.zip",
                 "https://nlp.stanford.edu/data/gqa/eval.zip"
-            ], tensorflow_cls=TensorflowGQA)
+            ], tensorflow_cls=TensorflowGQA, pytorch_cls=PytorchGQA)
 
     @property
     def answer_path(self):
@@ -63,6 +65,8 @@ class GQA(DatasetBuilder):
         fn = mode
         if self.configs.balanced:
             fn += "_balanced"
+        if self.configs.bert_tokenizer:
+            fn += "_bert"
         return os.path.join(self.get_processed_data_dir(), f"{fn}.csv")
 
     def get_image_features_path(self):
@@ -72,15 +76,18 @@ class GQA(DatasetBuilder):
         if not super().maybe_preprocess(force):
             return
 
-        # for mode in ["train", "val", "testdev", "test", "submission", "challenge"]:
-        #     data = self.load_json_data(mode)
-        #     self.process_questions(mode, data)
+        for mode in ["train", "val", "testdev", "test", "submission", "challenge"]:
+        # for mode in ["testdev"]:
+            data = self.load_json_data(mode)
+            self.process_questions(mode, data)
+            # self.process_questions_bert(mode, data)
+            # self.extract_bert_features(mode, data)
 
         # self.tf_process_image_features(mode)
         # self.torch_process_image_features(mode, len(data['questions']))
         # self.merge_features("spatial")
         # self.merge_features("objects")
-        self.process_graphs()
+        # self.process_graphs()
 
     def load_json_data(self, mode):
         logger.info(f"Loading {mode} data...")
@@ -101,8 +108,7 @@ class GQA(DatasetBuilder):
         logger.info(f"Merging dataset...")
         spec = {
             "spatial": {"features": (148855, 2048, 7, 7)},
-            "objects": {"features": (148855, 100, 2048),
-                        "bboxes": (148855, 100, 4)}}
+            "objects": {"features": (148855, 100, 2048), "bboxes": (148855, 100, 4)}}
 
         lengths = [0]
         with h5py.File(os.path.join(self.get_processed_data_dir(), f"{name}.h5"), "w") as out:
@@ -135,9 +141,9 @@ class GQA(DatasetBuilder):
         image_filenames = []
 
         for key in tqdm(data, desc=f"Tokenizing {mode}"):
-            if self.configs.balanced:
-                if not data[key]['isBalanced']:
-                    continue
+            # if self.configs.balanced:
+            #     if not data[key]['isBalanced']:
+            #         continue
             questions.append(tokenize(data[key]['question']))
             answers.append(data[key].get('answer', "none").strip())
             image_filenames.append(data[key]['imageId'])
@@ -160,6 +166,61 @@ class GQA(DatasetBuilder):
                     ' '.join(q),
                     a,
                 ]) + "\n")
+
+    def process_questions_bert(self, mode, data):
+        questions = []
+        answers = []
+        image_filenames = []
+
+        from transformers import BertTokenizer
+        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+
+        for key in tqdm(data, desc=f"Tokenizing {mode}"):
+            # if self.configs.balanced:
+            #     if not data[key]['isBalanced']:
+            #         continue
+            questions.append(tokenizer.encode(data[key]['question']))
+            answers.append(data[key].get('answer', "none").strip())
+            image_filenames.append(data[key]['imageId'])
+
+        if mode == "train":
+            answer_list = list(set(answers))
+            with open(self.answer_path, "w") as f:
+                f.write("\n".join(answer_list))
+
+        with open(self.get_data_path(mode), 'w') as f:
+            for qid, q, a, img in zip(
+                    list(data.keys()),
+                    questions,
+                    answers,
+                    image_filenames):
+                f.write('\t'.join([
+                    qid,
+                    img,
+                    ' '.join([str(i) for i in q]),
+                    a,
+                ]) + "\n")
+
+    def extract_bert_features(self, mode, data):
+        from transformers import BertTokenizer, BertModel
+        with h5py.File(os.path.join(self.get_processed_data_dir(), f"bert_features_{mode}.h5"), 'w') as f:
+            outputs = f.create_dataset("outputs", (len(data), 30, 768), dtype=np.float32)
+            lengths = f.create_dataset("lengths", (len(data), ), dtype=np.int)
+            states = f.create_dataset("state", (len(data), 768), dtype=np.float32)
+            tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+            model = BertModel.from_pretrained('bert-base-uncased')
+            model.cuda()
+            batch_size = 64
+            keys = list(data.keys())
+            for start in tqdm(range(0, len(data), batch_size), desc=f"Extracting BERT features ({mode})"):
+                end = min(start + batch_size, len(data))
+                input_ids = [tokenizer.encode(data[keys[i]]['question'], max_length=30) for i in range(start, end)]
+                from dlex.torch.utils.variable_length_tensor import pad_sequence
+                padded_input_ids, _ = pad_sequence(input_ids, padding_value=tokenizer.pad_token_id, max_len=30, output_tensor=True)
+                out = model(padded_input_ids)
+                lengths[start:end] = np.array([len(s) for s in input_ids])
+                outputs[start:end] = out[0].detach().cpu().numpy()
+                states[start:end] = out[1].detach().cpu().numpy()
 
     def process_graphs(self):
         logger.info("Processing scene graphs...")
