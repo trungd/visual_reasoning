@@ -225,6 +225,9 @@ class MAC(ClassificationModel):
 
         self.reset()
 
+        # Metrics
+        self._accuracy = 0
+
     def reset(self):
         if self.encoder:
             self.encoder.reset()
@@ -263,3 +266,7 @@ class MAC(ClassificationModel):
 
         out = self.linear(out)
         return out
+
+    def reset_counter(self):
+        super().reset_counter()
+        self._accuracy = 0

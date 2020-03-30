@@ -36,7 +36,21 @@ env:
         bert_features: false
         object_features: false
         spatial_features: true
+  test:
+    params:
+      model:
+        encoder:
+          type: lstm
+          dim: 512
+          project: false
+          bidirectional: true
+      dataset:
+        bert_features: false
+        object_features: false
+        spatial_features: true
         size: 1000
+      test:
+        output: false
 model:
   name: src.torch.models.MAC
   dim: 512
@@ -71,6 +85,6 @@ train:
   log_every: 0.1e
   save_every: 1e
 test:
-  test_sets: [train]
+  test_sets: [submission]
   log_every: 5s
   output: true

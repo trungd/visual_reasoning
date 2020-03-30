@@ -1,6 +1,6 @@
 backend: tensorflow_v1
 model:
-  name: src.tf.mac.MAC
+  name: src.tf.models.mac.MAC
   image:
     output_height: 7
     output_width: 7
