@@ -142,6 +142,7 @@ class PytorchGQA(Dataset):
             obj = obj_bboxes = [None for _ in range(len(samples))]
 
         q = [s.question for s in samples]
+        qid = [s.question_id for s in samples]
         ans = [s.answer for s in samples]
 
         if self.use_bert_features:
@@ -151,12 +152,12 @@ class PytorchGQA(Dataset):
         else:
             bert_outputs = bert_states = bert_lengths = [None for _ in range(len(samples))]
 
-        ret = list(zip(img, obj, obj_bboxes, q, bert_outputs, bert_states, bert_lengths, ans))
+        ret = list(zip(img, obj, obj_bboxes, q, qid, bert_outputs, bert_states, bert_lengths, ans))
         return ret[0] if type(i) == int else ret
 
     def collate_fn(self, batch: List[Tuple]):
         batch = sorted(batch, key=lambda x: len(x[3]), reverse=True)
-        imgs, objs, obj_bboxes, qs, bert_outputs, bert_states, bert_lengths, ans = [[b[i] for b in batch] for i in range(len(batch[0]))]
+        imgs, objs, obj_bboxes, qs, qids, bert_outputs, bert_states, bert_lengths, ans = [[b[i] for b in batch] for i in range(len(batch[0]))]
 
         qs, qlen = pad_sequence(qs, self.vocab.blank_token_idx, output_tensor=True)
 
@@ -178,6 +179,7 @@ class PytorchGQA(Dataset):
             question_bert_lengths=torch.LongTensor(bert_lengths) if self.use_bert_features else None)
 
         return Batch(
+            ids=qids,
             X=batch_x,
             Y=torch.LongTensor(ans))
 
@@ -193,14 +195,15 @@ class PytorchGQA(Dataset):
     def write_results_to_file(
             self,
             all_predictions: List[Any],
+            sample_ids: List[Any],
             output_path: str,
             output_tag: str,
             format: str = None) -> str:
         os.makedirs(output_path, exist_ok=True)
         res = [dict(
-            questionId=sample.question_id,
+            questionId=qid,
             prediction=self.answers[pred]
-        ) for sample, pred in zip(self.data, all_predictions)]
+        ) for qid, pred in zip(sample_ids, all_predictions)]
         path = os.path.join(output_path, output_tag + ".json")
         with open(path, "w") as f:
             json.dump(res, f)

@@ -80,11 +80,11 @@ train:
     name: adam
     lr: 0.0001
   lr_scheduler:
-    milestones: [4, 6, 8]
+    milestones: [10, 15, 20]
     gamma: 0.5
   log_every: 0.1e
   save_every: 1e
 test:
-  test_sets: [submission]
+  test_sets: [testdev]
   log_every: 5s
-  output: true
+  output: false

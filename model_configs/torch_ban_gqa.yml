@@ -48,6 +48,8 @@ train:
     gamma: 0.5
   log_every: 0.1e
   save_every: 1e
+  max_grad_norm: 8
 test:
-  test_sets: [testdev]
+  test_sets: [submission]
   log_every: 5s
+  output: true

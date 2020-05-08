@@ -2,6 +2,7 @@ from collections import namedtuple
 
 batch_x_fields = (
     "images",
+    "question_ids",
     "questions",
     "question_lengths",
     "question_bert_outputs",

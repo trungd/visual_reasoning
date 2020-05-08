@@ -28,7 +28,15 @@ class GQA(DatasetBuilder):
                 "https://nlp.stanford.edu/data/gqa/sceneGraphs.zip",
                 "https://nlp.stanford.edu/data/gqa/questions1.2.zip",
                 # "https://nlp.stanford.edu/data/gqa/allImages.zip",
-                "https://nlp.stanford.edu/data/gqa/eval.zip"
+                "https://nlp.stanford.edu/data/gqa/eval.zip",
+                # Genome dataset
+                "https://visualgenome.org/static/data/dataset/objects.json.zip",
+                "https://visualgenome.org/static/data/dataset/relationships.json.zip",
+                "https://visualgenome.org/static/data/dataset/object_alias.txt",
+                "https://visualgenome.org/static/data/dataset/relationship_alias.txt",
+                "https://visualgenome.org/static/data/dataset/object_synsets.json.zip",
+                "https://visualgenome.org/static/data/dataset/attribute_synsets.json.zip",
+                "https://visualgenome.org/static/data/dataset/relationship_synsets.json.zip"
             ], tensorflow_cls=TensorflowGQA, pytorch_cls=PytorchGQA)
 
     @property

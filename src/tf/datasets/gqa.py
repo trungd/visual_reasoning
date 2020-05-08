@@ -27,12 +27,26 @@ class TensorflowGQA(Dataset):
         self._answers = None
         self._image_ids = None
 
-        self.h5_spatial = h5py.File(os.path.join(self.processed_data_dir, "spatial.h5"), 'r')
-        self.h5_object = h5py.File(os.path.join(self.processed_data_dir, "objects.h5"), 'r')
-        self.image_spatial_features = self.h5_spatial['features']
-        self.image_object_features = self.h5_object['features']
+        if self.use_spatial_features:
+            self.h5_spatial = h5py.File(os.path.join(self.processed_data_dir, "spatial.h5"), 'r')
+            self.image_spatial_features = self.h5_spatial['features']
+        if self.use_object_features:
+            self.h5_object = h5py.File(os.path.join(self.processed_data_dir, "objects.h5"), 'r')
+            self.image_object_features = self.h5_object['features']
         # self.image_idx = self.h['indices']
         self._word_embeddings = None
+
+    @property
+    def use_bert_features(self):
+        return self.configs.bert_features
+
+    @property
+    def use_object_features(self):
+        return self.configs.object_features
+
+    @property
+    def use_spatial_features(self):
+        return self.configs.spatial_features
 
     @property
     def vocab_size(self):
@@ -100,12 +114,10 @@ class TensorflowGQA(Dataset):
         feed_dict[placeholders.question_lengths] = qlen
         feed_dict[placeholders.images] = [self.image_spatial_features[self.image_ids[s.image_id]] for s in data]
         feed_dict[placeholders.answers] = [s.answer for s in data]
-        try:
+        if self.use_object_features:
             feed_dict[placeholders.objects] = [self.image_object_features[self.image_ids[s.image_id]] for s in data]
             feed_dict[placeholders.num_objects] = [self.image_object_features[self.image_ids[s.image_id]] for s in data]
             # feed_dict[placeholders.object_relations] =
-        except:
-            pass
 
     def get_word_embeddings(self, size, dim, initializing='uniform', scale=1.):
         if initializing == 'normal':
