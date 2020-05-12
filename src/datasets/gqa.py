@@ -10,8 +10,8 @@ from dlex.datasets import DatasetBuilder
 from dlex.datasets.nlp.utils import write_vocab, nltk_tokenize
 from tqdm import tqdm
 
-from .tf.datasets.gqa import TensorflowGQA
-from .torch.datasets.gqa import PytorchGQA
+from ..tf.datasets.gqa import TensorflowGQA
+from ..torch.datasets.gqa import PytorchGQA
 
 
 def tokenize(s: str) -> List[str]:

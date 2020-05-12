@@ -9,9 +9,11 @@ model:
   num_steps: 8
   dropout: 0.15
 dataset:
-  name: src.torch.datasets.gqa.GQA
+  name: src.datasets.gqa.GQA
 train:
   num_epochs: 15
   optimizer:
     name: adam
     gamma: 1e-4
+test:
+  test_sets: [valid]
