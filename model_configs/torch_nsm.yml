@@ -10,8 +10,13 @@ model:
   dropout: 0.15
 dataset:
   name: src.datasets.gqa.GQA
+  balanced: true
+  object_features: true
+  embeddings:
+    pretrained: glove
 train:
   num_epochs: 15
+  batch_size: 32
   optimizer:
     name: adam
     gamma: 1e-4

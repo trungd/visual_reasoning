@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from dlex import Params
+from dlex.datasets.nlp.utils import load_embeddings
 from dlex.datasets.torch import Dataset
 from dlex.torch.models import BaseModel
 from dlex.torch.utils.model_utils import RNN
@@ -28,11 +29,10 @@ class NSM(BaseModel):
             nn.ELU(),
             nn.Linear(2 * cfg.embed_dim, dataset.num_classes))
 
-        self.concept_emb = nn.Embedding()  # C + 1
-        # add non-structural concept embedding
-        self.concept_emb = torch.cat([self.concept_emb, torch.rand(1, cfg.embed_dim, requires_grad=True)])
+        self.concept_emb = self.dataset.get_concept_embeddings()
+        self.concept_emb = torch.cat([self.concept_emb, torch.rand(1, cfg.embed_dim, requires_grad=True)], dim=0)  # (C + 1) * dim
 
-        self.attribute_emb = nn.Embedding()  # L + 2
+        self.attribute_emb = self.dataset.get_attribute_name_embeddings()  # L + 2
 
     @property
     def num_nodes(self):
@@ -102,7 +102,7 @@ class NSM(BaseModel):
 
         # concept-based representation of each word
         V = (word_concept_similarity[:, :, -1]).unsqueeze(2) * bx.questions + \
-            torch.bmm(word_concept_similarity[:, :, :-1], C[:-1, :].expand(batch_size, -1, cfg.embed_dim))
+            torch.bmm(word_concept_similarity[:, :, :-1], self.concept_emb[:-1, :].expand(batch_size, -1, cfg.embed_dim))
 
         _, encoder_hidden = self.encoder(V)
         q, _ = encoder_hidden
@@ -130,6 +130,6 @@ class NSM(BaseModel):
             torch.sum(property_R.view(batch_size, 1, self.num_attributes + 1, 1) * S, dim=2)
         )
 
-        pre_logits = self.classifier(torch.cat([m, q], dim=2).squeeze(1))
+        logits = self.classifier(torch.cat([m, q], dim=2).squeeze(1))
 
-        return pre_logits
+        return logits

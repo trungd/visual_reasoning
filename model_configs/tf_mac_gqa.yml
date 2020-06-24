@@ -93,7 +93,7 @@ model:
   batch_norm_center: false
   batch_norm_scale: false
 dataset:
-  name: src.gqa.GQA
+  name: src.datasets.gqa.GQA
   embedding:
     dim: 300
   shuffle: true

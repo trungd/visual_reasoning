@@ -1,6 +1,6 @@
 backend: tensorflow_v1
 model:
-  name: src.tf.mac.MAC
+  name: src.tf.models.mac.MAC
   image:
     model: resnet101
     model_stage: 3
@@ -98,7 +98,7 @@ model:
   batch_norm_center: false
   batch_norm_scale: false
 dataset:
-  name: src.clevr.CLEVR
+  name: src.datasets.clevr.CLEVR
   embedding:
     dim: 300
   shuffle: true

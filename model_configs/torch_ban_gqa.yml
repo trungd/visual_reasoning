@@ -34,7 +34,7 @@ model:
     use_question: true
   dropout: 0.15
 dataset:
-  name: src.gqa.GQA
+  name: src.datasets.gqa.GQA
   shuffle: false
 train:
   # valid_set: valid

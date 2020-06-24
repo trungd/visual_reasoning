@@ -1,5 +1,6 @@
 from collections import namedtuple
 
+
 batch_x_fields = (
     "images",
     "question_ids",
@@ -10,5 +11,9 @@ batch_x_fields = (
     "question_bert_lengths",
     "objects",
     "object_lengths",
-    "object_bounding_boxes")
+    "object_bounding_boxes",
+    "object_identities",
+    "object_attributes",
+    "object_relations")
+
 BatchX = namedtuple("BatchX", batch_x_fields, defaults=(None,) * len(batch_x_fields))

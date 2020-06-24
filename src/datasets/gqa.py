@@ -7,7 +7,7 @@ import h5py
 import numpy as np
 from dlex import Params, logger, List
 from dlex.datasets import DatasetBuilder
-from dlex.datasets.nlp.utils import write_vocab, nltk_tokenize
+from dlex.datasets.nlp.utils import write_vocab, nltk_tokenize, Vocab
 from tqdm import tqdm
 
 from ..tf.datasets.gqa import TensorflowGQA
@@ -26,9 +26,9 @@ class GQA(DatasetBuilder):
             params,
             [
                 "https://nlp.stanford.edu/data/gqa/sceneGraphs.zip",
-                "https://nlp.stanford.edu/data/gqa/questions1.2.zip",
+                # "https://nlp.stanford.edu/data/gqa/questions1.2.zip",
                 # "https://nlp.stanford.edu/data/gqa/allImages.zip",
-                "https://nlp.stanford.edu/data/gqa/eval.zip",
+                # "https://nlp.stanford.edu/data/gqa/eval.zip",
                 # Genome dataset
                 "https://visualgenome.org/static/data/dataset/objects.json.zip",
                 "https://visualgenome.org/static/data/dataset/relationships.json.zip",
@@ -42,29 +42,26 @@ class GQA(DatasetBuilder):
     @property
     def answer_path(self):
         fn = "answers"
-        if self.configs.balanced:
-            fn += "_balanced"
         return os.path.join(self.get_processed_data_dir(), f"{fn}.txt")
 
     @property
     def vocab_path(self):
         fn = "vocab"
-        if self.configs.balanced:
-            fn += "_balanced"
         return os.path.join(self.get_processed_data_dir(), f"{fn}.txt")
 
     @property
     def relation_name_path(self):
         fn = "relations"
-        if self.configs.balanced:
-            fn += "_balanced"
         return os.path.join(self.get_processed_data_dir(), f"{fn}.txt")
 
     @property
     def object_name_path(self):
         fn = "objects"
-        if self.configs.balanced:
-            fn += "_balanced"
+        return os.path.join(self.get_processed_data_dir(), f"{fn}.txt")
+
+    @property
+    def attribute_name_path(self):
+        fn = "attributes"
         return os.path.join(self.get_processed_data_dir(), f"{fn}.txt")
 
     def get_data_path(self, mode: str):
@@ -77,6 +74,9 @@ class GQA(DatasetBuilder):
             fn += "_bert"
         return os.path.join(self.get_processed_data_dir(), f"{fn}.csv")
 
+    def get_image_data_path(self, mode: str):
+        return os.path.join(self.get_processed_data_dir(), f"{mode}_scene_graphs.csv")
+
     def get_image_features_path(self):
         return os.path.join(self.get_processed_data_dir(), "spatial.h5")
 
@@ -85,9 +85,9 @@ class GQA(DatasetBuilder):
             return
 
         for mode in ["train", "val", "testdev", "test", "submission", "challenge"]:
-        # for mode in ["testdev"]:
-            data = self.load_json_data(mode)
-            self.process_questions(mode, data)
+            pass
+            # data = self.load_json_data(mode)
+            # self.process_questions(mode, data)
             # self.process_questions_bert(mode, data)
             # self.extract_bert_features(mode, data)
 
@@ -95,7 +95,7 @@ class GQA(DatasetBuilder):
         # self.torch_process_image_features(mode, len(data['questions']))
         # self.merge_features("spatial")
         # self.merge_features("objects")
-        # self.process_graphs()
+        self.process_graphs()
 
     def load_json_data(self, mode):
         logger.info(f"Loading {mode} data...")
@@ -237,21 +237,51 @@ class GQA(DatasetBuilder):
                 data = json.load(f)
 
             if mode == "train":
-                relation_names = set()
+                relation_names = {'<oov>'}
                 for s in data.values():
                     for obj in s['objects'].values():
                         if 'relations' in obj:
                             relation_names |= set(rela['name'] for rela in obj['relations'])
                 with open(self.relation_name_path, "w") as f:
                     f.write('\n'.join(list(relation_names)))
-                    logger.info("")
+                    logger.info(f"No. relations: {len(relation_names)}")
 
-                object_names = set()
+                object_names = {'<oov>'}
                 for s in data.values():
                     for obj in s['objects'].values():
                         object_names.add(obj['name'])
                 with open(self.object_name_path, "w") as f:
                     f.write('\n'.join(list(object_names)))
+                    logger.info(f"No. object identities: {len(object_names)}")
+
+                attribute_names = {'<oov>'}
+                for s in data.values():
+                    for obj in s['objects'].values():
+                        for attr in obj['attributes']:
+                            attribute_names.add(attr)
+                with open(self.attribute_name_path, 'w') as f:
+                    f.write('\n'.join(list(attribute_names)))
+                    logger.info(f"No. object attributes: {len(attribute_names)}")
+
+            outputs = []
+            for image_id, s in data.items():
+                obj_idx = {obj_id: idx for idx, obj_id in enumerate(s['objects'].keys())}
+                for obj_id, obj in s['objects'].items():
+                    rela = [None for _ in range(len(obj_idx))]
+                    for r in obj['relations']:
+                        rela[obj_idx[r['object']]] = r['name']
+                    outputs.append([
+                        image_id,
+                        obj_idx[obj_id],
+                        obj['name'],
+                        ','.join(obj['attributes']),
+                        ','.join('' if r is None else r for r in rela)
+                    ])
+
+            with open(self.get_image_data_path(mode), 'w') as f:
+                f.write('\n'.join(['\t'.join([
+                    str(cell) for cell in d
+                ]) for d in outputs]))
 
     def run_evaluation_script(
             self,

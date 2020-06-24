@@ -7,7 +7,7 @@ import h5py
 import torch
 import numpy as np
 from dlex import logger
-from dlex.datasets.nlp.utils import Vocab
+from dlex.datasets.nlp.utils import Vocab, load_embeddings
 from dlex.datasets.torch import Dataset
 from dlex.torch import Batch
 from dlex.torch.utils.variable_length_tensor import pad_sequence
@@ -25,6 +25,7 @@ class PytorchGQA(Dataset):
         self._vocab = None
         self._answers = None
         self._image_ids = None
+        self._image_data = None
 
         with open(os.path.join(self.processed_data_dir, "spatial_merged_info.json"), "r") as f:
             logger.info("Loading image ids...")
@@ -41,6 +42,13 @@ class PytorchGQA(Dataset):
             with open(os.path.join(self.processed_data_dir, "objects_merged_info.json"), "r") as f:
                 logger.info("Loading object info...")
                 self.object_info = json.load(f)
+
+            self.relation_vocab = Vocab.from_file(self.builder.relation_name_path)
+            self.object_vocab = Vocab.from_file(self.builder.object_name_path)
+            self.attribute_vocab = Vocab.from_file(self.builder.attribute_name_path)
+            self.relation_vocab.init_pretrained_embeddings('glove')
+            self.object_vocab.init_pretrained_embeddings('glove')
+            self.attribute_vocab.init_pretrained_embeddings('glove')
 
         if self.use_bert_features:
             self.h5_bert = h5py.File(os.path.join(self.processed_data_dir, f"bert_features_{mode}.h5"), "r")
@@ -115,6 +123,28 @@ class PytorchGQA(Dataset):
                 np.average([len(s.question) for s in self._data]))
         return self._data
 
+    @property
+    def image_data(self):
+        if self._image_data is None:
+            self._image_data = {}
+            with open(self.builder.get_image_data_path(self.mode)) as f:
+                lines = [l for l in f.read().strip().split('\n')]
+            for line in tqdm(lines):
+                img_id, obj_id, identity, attributes, relations = line.split('\t')
+                if img_id not in self._image_data:
+                    self._image_data[img_id] = [[], [], []]
+                self.image_data[img_id][0].append(self.object_vocab.encode_token_list(identity.split(' ')))
+                self.image_data[img_id][1].append([self.attribute_vocab.encode_token_list(attr.split(' ')) for attr in attributes.split(',')])
+                self.image_data[img_id][2].append([self.relation_vocab.encode_token_list(rela.split(' ')) for rela in relations.split(',')])
+
+        return self._image_data
+
+    def get_attribute_name_embeddings(self):
+        return torch.FloatTensor(self.attribute_vocab.embeddings)
+
+    def get_concept_embeddings(self):
+        return torch.FloatTensor(self.attribute_vocab.embeddings)
+
     def close(self):
         self.h5_spatial.close()
         self.h5_object.close()
@@ -134,10 +164,18 @@ class PytorchGQA(Dataset):
         if self.use_object_features:
             obj = []
             obj_bboxes = []
+            obj_identities = []
+            obj_relations = []
+            obj_attributes = []
             for s in samples:
                 img_id = self.image_ids[s.image_id]
                 obj.append(self.image_object_features[img_id][:self.object_info[s.image_id]['objectsNum']].tolist())
                 obj_bboxes.append(self.image_object_bboxes[img_id])
+
+                obj_identities, obj_attributes, obj_relations = self._image_data[s.image_id]
+                print(obj_identities)
+                input()
+
         else:
             obj = obj_bboxes = [None for _ in range(len(samples))]
 
@@ -152,12 +190,26 @@ class PytorchGQA(Dataset):
         else:
             bert_outputs = bert_states = bert_lengths = [None for _ in range(len(samples))]
 
-        ret = list(zip(img, obj, obj_bboxes, q, qid, bert_outputs, bert_states, bert_lengths, ans))
+        ret = list(zip(
+            img,
+            obj,
+            obj_bboxes,
+            obj_identities,
+            obj_attributes,
+            obj_relations,
+            q,
+            qid,
+            bert_outputs,
+            bert_states,
+            bert_lengths,
+            ans))
         return ret[0] if type(i) == int else ret
 
     def collate_fn(self, batch: List[Tuple]):
         batch = sorted(batch, key=lambda x: len(x[3]), reverse=True)
-        imgs, objs, obj_bboxes, qs, qids, bert_outputs, bert_states, bert_lengths, ans = [[b[i] for b in batch] for i in range(len(batch[0]))]
+        imgs, objs, obj_bboxes, obj_identities, obj_attributes, obj_relations, \
+            qs, qids, bert_outputs, bert_states, bert_lengths, ans \
+            = [[b[i] for b in batch] for i in range(len(batch[0]))]
 
         qs, qlen = pad_sequence(qs, self.vocab.blank_token_idx, output_tensor=True)
 
@@ -176,7 +228,10 @@ class PytorchGQA(Dataset):
             object_lengths=objlen if self.use_object_features else None,
             question_bert_states=torch.FloatTensor(bert_states) if self.use_bert_features else None,
             question_bert_outputs=torch.FloatTensor([o[:bert_max_length] for o in bert_outputs]) if self.use_bert_features else None,
-            question_bert_lengths=torch.LongTensor(bert_lengths) if self.use_bert_features else None)
+            question_bert_lengths=torch.LongTensor(bert_lengths) if self.use_bert_features else None,
+            object_identities=obj_identities if self.use_object_features else None,
+            object_attributes=obj_attributes if self.use_object_features else None,
+            object_relations=obj_relations if self.use_object_features else None)
 
         return Batch(
             ids=qids,

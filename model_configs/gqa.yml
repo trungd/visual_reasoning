@@ -23,7 +23,7 @@ model:
   dim: 512
   dropout: 0.2
 dataset:
-  name: src.gqa.GQA
+  name: src.datasets.gqa.GQA
   balanced: false
   size: 10000
   embedding:
